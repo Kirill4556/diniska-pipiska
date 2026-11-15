@@ -1,0 +1,40 @@
+[project]
+name = "splitter"
+version = "0.1.0"
+description = "Разделение песни на минус (инструментал) и вокал"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # extra "cpu" — это только onnxruntime; наши модели идут через torch и считаются на CUDA.
+    "audio-separator[cpu]>=0.48",
+    "torch>=2.6",
+    "imageio-ffmpeg>=0.5",
+    "pyside6-essentials>=6.12.0",
+    "openai-whisper>=20250625",
+    "yt-dlp[default]>=2026.10.26",
+]
+
+[project.scripts]
+splitter = "splitter.cli:main"
+
+[project.gui-scripts]
+splitter-gui = "splitter.gui:main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.22.3",
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+# torch с CUDA берём из индекса PyTorch (на PyPI для Windows лежит только CPU-сборка).
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }

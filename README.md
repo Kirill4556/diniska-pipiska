@@ -1,0 +1,81 @@
+# splitter
+
+Делит песню на два файла: **минус** (инструментал) и **вокал**. Вся обработка локальная.
+Полное ТЗ: [ТЗ приложение-сплиттер mp3 → минус + вокал.md](<ТЗ приложение-сплиттер mp3 → минус + вокал.md>).
+
+## Установка
+
+Нужен [uv](https://docs.astral.sh/uv/). ffmpeg ставить не надо — он идёт вместе с зависимостями.
+
+```
+uv sync
+```
+
+## Запуск
+
+Окно (перетащите песни или папки, выберите качество и формат, нажмите «Разделить»):
+
+```
+uv run splitter-gui
+```
+
+Командная строка:
+
+```
+uv run splitter song.mp3 --out ./result --format mp3 --bitrate 320 --quality high
+uv run splitter ./album --out ./result
+```
+
+Результат: `result/song_instrumental.mp3` и `result/song_vocals.mp3`.
+
+| Параметр | Значения | По умолчанию |
+| --- | --- | --- |
+| `--out` | папка результата | `./result` |
+| `--format` | `mp3`, `wav`, `flac` | `mp3` |
+| `--bitrate` | `192`, `256`, `320` (только mp3) | `320` |
+| `--quality` | `fast` (Demucs htdemucs), `high` (BS-Roformer) | `high` |
+
+### Расширения
+
+| Параметр | Что делает | Файлы на выходе |
+| --- | --- | --- |
+| `--mode stems` | 4 дорожки | `_vocals`, `_drums`, `_bass`, `_other` и `_instrumental` из дорожек `--mix` |
+| `--mix drums,other` | что смешать в минус в режиме `stems` (`none` — не делать минус) | |
+| `--mode backing` | основной голос и бэк-вокал отдельно | `_lead`, `_backing`, `_instrumental`, `_instrumental_backing` |
+| `--lyrics` | распознаёт текст по вокалу (Whisper) | `<имя>.txt` и `<имя>.lrc` с таймкодами |
+| `--language auto\|ru\|en` | язык текста | |
+
+Вместо файла можно передать ссылку на трек или видео — звук скачается (yt-dlp) в папку результата как mp3:
+
+```
+uv run splitter "https://..." --out ./result --mode backing --lyrics
+```
+
+Скачивайте только то, на что у вас есть права. В окне всё то же самое: режим, галочки «Смешать в минус»,
+«Распознать текст», кнопка «Добавить ссылку…»; распознанный текст правится кнопкой «Текст…».
+
+Модели скачиваются при первом запуске в `%LOCALAPPDATA%\splitter\models`
+(Linux: `~/.cache/splitter/models`), дальше интернет не нужен.
+
+## Сборка приложения
+
+Готовое приложение не требует ни Python, ни uv, ни ffmpeg — всё внутри (PyInstaller, одна папка).
+
+| Платформа | Команда | Результат |
+| --- | --- | --- |
+| Windows | `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1` | `packaging\dist\Splitter\` и установщик `packaging\dist\SplitterSetup-*.exe` с `.bin`-файлами |
+| Linux | `bash packaging/build_linux.sh` | `packaging/dist/Splitter-linux-x86_64.tar.gz` |
+
+В папке приложения два файла: `Splitter` — окно, `splitter-cli` — командная строка (те же параметры, что у `uv run splitter`).
+Установщик для Windows собирается [Inno Setup](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`),
+ставится без прав администратора. Из-за PyTorch с CUDA приложение занимает около 4,5 ГБ, поэтому установщик
+разбит на `.exe` и `.bin`-файлы — переносить их нужно вместе.
+
+Модели в сборку не входят: они скачиваются при первом запуске.
+
+## Состояние
+
+Сделаны этапы 1–3 из ТЗ (прототип, CLI, GUI) и расширения А, Б, В, З; есть сборка для Windows. Сборка для Linux описана скриптом, но ещё не запускалась.
+
+Окно запускает обработку в отдельном процессе ([worker.py](src/splitter/worker.py)): так интерфейс не подвисает,
+а «Отмена» срабатывает сразу. Тесты: `uv run pytest`.
