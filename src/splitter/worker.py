@@ -111,6 +111,7 @@ def main() -> None:
             mix=tuple(job.get("mix", ())),
             lyrics=job.get("lyrics", False),
             language=job.get("language"),
+            lyrics_online=job.get("lyrics_online", False),
         )
         progress = _Progress(send, _BARS_PER_FILE.get((options.mode, options.quality), 1))
         progress.install()
@@ -120,7 +121,7 @@ def main() -> None:
                 progress.begin(data["index"], "progress")
             elif event == "lyrics_start":
                 progress.begin(data["index"], "lyrics_progress")
-            elif event in ("split", "lyrics", "error"):
+            elif event in ("split", "lyrics", "lyrics_online", "error"):
                 progress.end()
             send(event, **data)
 

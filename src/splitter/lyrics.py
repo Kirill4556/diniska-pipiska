@@ -20,6 +20,20 @@ def format_lrc(lines: list[tuple[float, str]]) -> str:
     return "\n".join(out) + "\n"
 
 
+_LINE_RE = re.compile(r"^\s*\[(\d+):(\d+(?:[.:]\d+)?)\](.*)$")
+
+
+def parse_lrc(lrc: str) -> list[tuple[float, str]]:
+    """Текст .lrc -> [(секунды, строка)]. Строки без таймкода и служебные теги ([ar:…]) пропускаются."""
+    lines = []
+    for line in lrc.splitlines():
+        match = _LINE_RE.match(line)
+        if match:
+            minutes, seconds, text = match.groups()
+            lines.append((int(minutes) * 60 + float(seconds.replace(":", ".")), text.strip()))
+    return sorted(lines, key=lambda pair: pair[0])
+
+
 def lrc_to_text(lrc: str) -> str:
     """Убирает таймкоды: из .lrc получается обычный текст."""
     lines = (_TIMECODE_RE.sub("", line).rstrip() for line in lrc.splitlines())

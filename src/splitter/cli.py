@@ -64,7 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="для --mode stems: что смешать в минус, через запятую из drums,bass,other (по умолчанию все; none — не делать минус)",
     )
     parser.add_argument("--lyrics", action="store_true", help="распознать текст песни и сохранить .txt и .lrc")
-    parser.add_argument("--language", choices=("auto", "ru", "en"), default="auto", help="язык текста (по умолчанию определяется автоматически)")
+    parser.add_argument(
+        "--lyrics-online",
+        action="store_true",
+        help="с --lyrics: сначала искать готовый текст в LRCLIB (отправляются только исполнитель, название и длительность)",
+    )
+    parser.add_argument("--language",choices=("auto", "ru", "en"), default="auto", help="язык текста (по умолчанию определяется автоматически)")
     parser.add_argument("--batch", action="store_true", help="обрабатывать папки целиком (включается автоматически, если передана папка)")
     parser.add_argument("--version", action="version", version=f"splitter {__version__}")
     return parser
@@ -126,8 +131,10 @@ def run(args: argparse.Namespace) -> int:
         mix=mix,
         lyrics=args.lyrics,
         language=LANGUAGES[args.language],
+        lyrics_online=args.lyrics_online,
     )
     total = len(items)
+    searched: set[int] = set()  # где уже искали текст в LRCLIB
     log = RunLog("cli")
     log.write(f"задание: {total} шт., {options}")
 
@@ -155,9 +162,14 @@ def run(args: argparse.Namespace) -> int:
         elif event == "lyrics_model":
             print("Загружаю модель распознавания текста (при первом запуске она скачивается)...")
         elif event == "lyrics_start":
-            print(f"{label(data['index'])}: распознаю текст…")
+            searching = options.lyrics_online and data["index"] not in searched
+            searched.add(data["index"])
+            print(f"{label(data['index'])}: {'ищу готовый текст' if searching else 'распознаю текст'}…")
+        elif event == "lyrics_online":
+            print(f"  готовый текст: {data['note']}" + ("" if data["found"] else " — распознаю сам"))
         elif event == "lyrics":
-            print(f"  текст ({data['lines']} строк): {data['txt']}")
+            source = " из LRCLIB" if data.get("source") == "lrclib" else ""
+            print(f"  текст{source} ({data['lines']} строк): {data['txt']}")
             print(f"  текст с таймкодами: {data['lrc']}")
         elif event == "error":
             print(f"{label(data['index'])}\n  ! {data['message']}", file=sys.stderr)

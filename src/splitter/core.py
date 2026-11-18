@@ -38,6 +38,7 @@ class Options:
     mix: tuple[str, ...] = MIX_STEMS  # какие дорожки смешать в минус в режиме stems
     lyrics: bool = False
     language: str | None = None  # None — определить автоматически
+    lyrics_online: bool = False  # сначала искать готовый текст в LRCLIB (FR-17)
 
     def validate(self) -> None:
         if self.mode not in MODES:

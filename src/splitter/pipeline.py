@@ -6,7 +6,8 @@
     model                               — загружается модель разделения
     start(index, stem)                  — началось разделение файла; stem — начало имён результатов
     split(index, outputs, seconds)      — дорожки готовы
-    lyrics_model / lyrics_start(index) / lyrics(index, txt, lrc)
+    lyrics_model / lyrics_start(index) / lyrics(index, txt, lrc, lines, source: lrclib|whisper)
+    lyrics_online(index, found, note)   — результат поиска готового текста в LRCLIB
     done(index)                         — по файлу сделано всё
     error(index, message)               — файл пропущен
 """
@@ -68,6 +69,26 @@ def run(inputs: list[str], out: Path, options: Options, emit) -> int:
             else:
                 emit("done", index=index)
 
+        if vocals and options.lyrics_online:
+            from .lrclib import lookup
+            from .lyrics import format_lrc, save_lyrics
+
+            for index in list(vocals):
+                emit("lyrics_start", index=index)
+                lines, note = lookup(sources[index])
+                emit("lyrics_online", index=index, found=lines is not None, note=note)
+                if lines is None:
+                    continue
+                try:
+                    txt, lrc = save_lyrics(format_lrc(lines), out, stems[index])
+                except OSError as exc:
+                    fail(index, SplitterError(f"Не удалось сохранить текст: {exc}"))
+                    del vocals[index]
+                    continue
+                emit("lyrics", index=index, txt=str(txt), lrc=str(lrc), lines=len(lines), source="lrclib")
+                emit("done", index=index)
+                del vocals[index]
+
         if vocals:
             from .lyrics import Transcriber, format_lrc, save_lyrics
 
@@ -87,6 +108,6 @@ def run(inputs: list[str], out: Path, options: Options, emit) -> int:
                 except SplitterError as exc:
                     fail(index, exc)
                     continue
-                emit("lyrics", index=index, txt=str(txt), lrc=str(lrc), lines=len(lines))
+                emit("lyrics", index=index, txt=str(txt), lrc=str(lrc), lines=len(lines), source="whisper")
                 emit("done", index=index)
     return len(failed)

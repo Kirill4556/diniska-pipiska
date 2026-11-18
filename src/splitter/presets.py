@@ -16,7 +16,7 @@ BUILTIN: dict[str, tuple[str, dict]] = {
 }
 
 # настройки, которые запоминает пользовательский пресет
-SETTING_KEYS = ("mode", "mix", "quality", "format", "bitrate", "lyrics", "language")
+SETTING_KEYS = ("mode", "mix", "quality", "format", "bitrate", "lyrics", "language", "lyrics_online")
 
 
 def builtin(key: str) -> dict:
