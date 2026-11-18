@@ -99,6 +99,33 @@ def test_output_names_per_mode():
         Options(mode="karaoke").validate()
 
 
+def test_clean_part_choice():
+    from splitter.core import _clean_part
+
+    assert _clean_part({"noreverb": 1, "reverb": 2}) == 1
+    assert _clean_part({"no echo": 1, "echo": 2}) == 1
+    assert _clean_part({"dry": 1, "noise": 2}) == 1
+    assert _clean_part({"vocals": 1, "noise": 2}) == 1
+    assert _clean_part({"a": 1, "b": 2}) is None  # непонятно — не угадываем
+
+
+def test_average_of_models():
+    from splitter.core import _average
+
+    first = {"vocals": np.ones((10, 2)), "instrumental": np.zeros((10, 2))}
+    second = {"vocals": np.zeros((8, 2)), "instrumental": np.ones((8, 2))}
+    mean = _average([first, second])
+    assert mean["vocals"].shape == (8, 2) and np.allclose(mean["vocals"], 0.5) and np.allclose(mean["instrumental"], 0.5)
+    assert _average([first]) is first
+
+
+def test_clean_and_max_options():
+    assert output_names(Options(clean_vocals=True)) == ["instrumental", "vocals", "vocals_clean"]
+    assert output_names(Options(mode="backing", clean_vocals=True))[-1] == "lead_clean"
+    Options(quality="max").validate()
+    assert build_parser().parse_args(["s.mp3", "-q", "max", "--clean-vocals"]).clean_vocals
+
+
 def test_lyrics_files(tmp_path):
     lrc = format_lrc([(0.0, " Первая строка "), (75.5, "Second line")])
     assert lrc == "[00:00.00]Первая строка\n[01:15.50]Second line\n"

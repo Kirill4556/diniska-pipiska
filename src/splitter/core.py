@@ -17,16 +17,27 @@ AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a"}
 MODES = ("vocals", "stems", "backing")
 MIX_STEMS = ("drums", "bass", "other")
 
-# FR-4: «быстро» — Demucs htdemucs, «качественно» — BS-Roformer (SDR ~12.9) / htdemucs_ft.
+QUALITIES = ("fast", "high", "max")
+BS_ROFORMER = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"  # лучший минус (SDR 16,45)
+KIM_ROFORMER = "vocals_mel_band_roformer.ckpt"  # лучший вокал (SDR 12,60)
+# FR-4: «быстро» — Demucs htdemucs, «качественно» — BS-Roformer / htdemucs_ft.
+# FR-20: «максимум» — несколько моделей, результаты усредняются.
 MODELS = {
-    "vocals": {"fast": "htdemucs.yaml", "high": "model_bs_roformer_ep_317_sdr_12.9755.ckpt"},
-    "stems": {"fast": "htdemucs.yaml", "high": "htdemucs_ft.yaml"},
+    "vocals": {"fast": ("htdemucs.yaml",), "high": (BS_ROFORMER,), "max": (BS_ROFORMER, KIM_ROFORMER)},
+    "stems": {"fast": ("htdemucs.yaml",), "high": ("htdemucs_ft.yaml",), "max": ("htdemucs_ft.yaml",)},
 }
 MODELS["backing"] = MODELS["vocals"]
+# сколько раз Demucs прогоняет трек со случайным сдвигом и усредняет (больше — чище, но дольше)
+DEMUCS_SHIFTS = {"fast": 1, "high": 2, "max": 4}
 # Делит вокальную дорожку на основной голос и подпевки.
 KARAOKE_MODEL = "mel_band_roformer_karaoke_aufr33_viperx_sdr_10.1956.ckpt"
+# FR-16: очистка вокала — сначала реверберация и эхо, потом шум.
+CLEAN_MODELS = ("dereverb_echo_mbr_fused.ckpt", "denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt")
 
 _STEM_RE = re.compile(r"_\(([^)]+)\)_")
+
+# настройки скорости моделей (подобраны замером на RTX 4060, см. README)
+SPEED_SETTINGS: dict = {}
 
 
 @dataclass
@@ -39,12 +50,13 @@ class Options:
     lyrics: bool = False
     language: str | None = None  # None — определить автоматически
     lyrics_online: bool = False  # сначала искать готовый текст в LRCLIB (FR-17)
+    clean_vocals: bool = False  # дополнительно очищенный от эха и шума вокал (FR-16)
 
     def validate(self) -> None:
         if self.mode not in MODES:
             raise SplitterError(f"Неизвестный режим: {self.mode}. Доступно: {', '.join(MODES)}.")
-        if self.quality not in ("fast", "high"):
-            raise SplitterError(f"Неизвестное качество: {self.quality}. Доступно: fast, high.")
+        if self.quality not in QUALITIES:
+            raise SplitterError(f"Неизвестное качество: {self.quality}. Доступно: {', '.join(QUALITIES)}.")
         unknown = set(self.mix) - set(MIX_STEMS)
         if unknown:
             raise SplitterError(f"Неизвестные дорожки для минуса: {', '.join(sorted(unknown))}. Доступно: {', '.join(MIX_STEMS)}.")
@@ -63,11 +75,19 @@ def part_path(dst: Path) -> Path:
 def output_names(options: Options) -> list[str]:
     """Какие дорожки появятся на выходе при данных настройках."""
     if options.mode == "stems":
-        names = ["vocals", "drums", "bass", "other"]
-        return names + ["instrumental"] if options.mix else names
-    if options.mode == "backing":
-        return ["instrumental", "instrumental_backing", "lead", "backing"]
-    return ["instrumental", "vocals"]
+        names = ["vocals", "drums", "bass", "other"] + (["instrumental"] if options.mix else [])
+    elif options.mode == "backing":
+        names = ["instrumental", "instrumental_backing", "lead", "backing"]
+    else:
+        names = ["instrumental", "vocals"]
+    if options.clean_vocals:
+        names.append(f"{clean_target(options)}_clean")
+    return names
+
+
+def clean_target(options: Options) -> str:
+    """Какой голос очищать: в режиме бэк-вокала — основной, иначе весь вокал."""
+    return "lead" if options.mode == "backing" else "vocals"
 
 
 _gpu_usable: bool | None = None
@@ -140,6 +160,35 @@ def unique_stems(paths: list[Path]) -> list[str]:
     return stems
 
 
+# FR-25: наборы моделей для предзагрузки в мастере первого запуска: ключ -> (модели, примерный размер, МБ)
+MODEL_PACKS = {
+    "fast": (("htdemucs.yaml",), 80),
+    "high": ((BS_ROFORMER,), 610),
+    "stems": (("htdemucs_ft.yaml",), 320),
+    "backing": ((KARAOKE_MODEL,), 871),
+    "max": ((KIM_ROFORMER,), 870),
+    "clean": (CLEAN_MODELS, 900),
+}
+
+
+def prefetch_model(model: str) -> None:
+    """Скачивает модель в кэш (если её ещё нет), не оставляя её в памяти."""
+    import gc
+
+    from audio_separator.separator import Separator
+
+    gpu_available()
+    ensure_ffmpeg()
+    with tempfile.TemporaryDirectory(prefix="splitter_prefetch_") as folder:
+        separator = Separator(log_level=logging.ERROR, model_file_dir=str(models_dir()), output_dir=folder)
+        try:
+            separator.load_model(model_filename=model)
+        except Exception as exc:
+            raise SplitterError(f"Не удалось скачать модель {model}: {exc}") from exc
+        del separator
+        gc.collect()
+
+
 class Splitter:
     """Держит загруженные модели, чтобы в пакетном режиме не грузить их на каждый файл."""
 
@@ -153,9 +202,9 @@ class Splitter:
         self._keep = self._workdir / "keep"
         self._scratch.mkdir()
         self._keep.mkdir()
-        self._separators = [self._load(MODELS[options.mode][options.quality])]
-        if options.mode == "backing":
-            self._separators.append(self._load(KARAOKE_MODEL))
+        self._main = [self._load(model) for model in MODELS[options.mode][options.quality]]
+        self._karaoke = self._load(KARAOKE_MODEL) if options.mode == "backing" else None
+        self._cleaners = [self._load(model) for model in CLEAN_MODELS] if options.clean_vocals else []
 
     def _load(self, model: str):
         from audio_separator.separator import Separator
@@ -168,6 +217,8 @@ class Splitter:
             output_format="WAV",
             # без нормализации: дорожки должны в сумме давать оригинал
             normalization_threshold=1.0,
+            **SPEED_SETTINGS,
+            demucs_params={"segment_size": "Default", "shifts": DEMUCS_SHIFTS[self.options.quality], "overlap": 0.25, "segments_enabled": True},
         )
         try:
             separator.load_model(model_filename=model)
@@ -184,13 +235,13 @@ class Splitter:
 
         import torch
 
-        self._separators.clear()
+        self._main, self._karaoke, self._cleaners = [], None, []
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def close(self) -> None:
-        self._separators.clear()
+        self._main, self._karaoke, self._cleaners = [], None, []
         shutil.rmtree(self._workdir, ignore_errors=True)
 
     def __enter__(self):
@@ -213,15 +264,21 @@ class Splitter:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            stems, rate = self._separate(self._separators[0], src)
-            if "vocals" not in stems or len(stems) < 2:
-                raise SplitterError(f"Модель не вернула нужные дорожки для {src.name} (получено: {', '.join(stems) or 'ничего'}).")
+            results, rate = [], 44100
+            for separator in self._main:
+                stems, rate = self._separate(separator, src)
+                if "vocals" not in stems or len(stems) < 2:
+                    raise SplitterError(f"Модель не вернула нужные дорожки для {src.name} (получено: {', '.join(stems) or 'ничего'}).")
+                if len(stems) == 2:  # у двухдорожечных моделей вторая дорожка — минус, как бы она ни называлась
+                    stems = {"vocals": stems["vocals"], "instrumental": next(a for n, a in stems.items() if n != "vocals")}
+                results.append(stems)
 
             original, _ = librosa.load(src, sr=rate, mono=False)
             original = np.atleast_2d(original).T
             if original.shape[1] == 1:
                 original = np.repeat(original, 2, axis=1)
-            stems = _restore_levels(original, stems)
+            # FR-20: у каждой модели свои уровни — выравниваем по оригиналу, потом усредняем
+            stems = _average([_restore_levels(original, result) for result in results])
             vocals = stems["vocals"]
             rest = [audio for name, audio in stems.items() if name != "vocals"]
 
@@ -232,7 +289,7 @@ class Splitter:
             elif options.mode == "backing":
                 vocals_wav = self._scratch / "vocals_for_karaoke.wav"
                 sf.write(vocals_wav, vocals, rate, subtype="FLOAT")
-                parts, _ = self._separate(self._separators[1], vocals_wav)
+                parts, _ = self._separate(self._karaoke, vocals_wav)
                 if set(parts) != {"vocals", "instrumental"}:
                     raise SplitterError(f"Модель бэк-вокала вернула неожиданные дорожки: {', '.join(parts)}.")
                 parts = _restore_levels(vocals, parts)
@@ -246,6 +303,10 @@ class Splitter:
                 }
             else:
                 tracks = {"instrumental": sum(rest), "vocals": vocals}
+
+            if self._cleaners:
+                target = clean_target(options)
+                tracks[f"{target}_clean"] = self._clean(tracks[target], rate, src.name)
 
             # одинаково приглушаем все дорожки, если хоть одна клиппирует
             peak = max(float(np.abs(audio).max()) for audio in tracks.values())
@@ -274,6 +335,25 @@ class Splitter:
             for leftover in self._scratch.iterdir():
                 leftover.unlink(missing_ok=True)
 
+    def _clean(self, voice, rate: int, name: str):
+        """FR-16: прогоняет голос через модели очистки (эхо/реверберация, затем шум)."""
+        import numpy as np
+        import soundfile as sf
+
+        audio = voice
+        for step, separator in enumerate(self._cleaners):
+            wav = self._scratch / f"clean_{step}.wav"
+            sf.write(wav, audio, rate, subtype="FLOAT")
+            parts, _ = self._separate(separator, wav)
+            kept = _clean_part(parts)
+            if kept is None:
+                raise SplitterError(f"Модель очистки вернула неожиданные дорожки для {name}: {', '.join(parts)}.")
+            audio = kept
+        # длина как у исходного голоса, чтобы дорожки совпадали по времени
+        if len(audio) >= len(voice):
+            return audio[: len(voice)]
+        return np.concatenate([audio, np.zeros((len(voice) - len(audio), audio.shape[1]), dtype=audio.dtype)])
+
     def _separate(self, separator, src: Path) -> tuple[dict, int]:
         """Запускает модель и читает дорожки: {имя: массив (n, 2)}, частота."""
         import soundfile as sf
@@ -301,6 +381,32 @@ class Splitter:
             if match:
                 stems[match.group(1).lower()], rate = sf.read(path, dtype="float32", always_2d=True)
         return stems, rate
+
+
+_DIRTY_WORDS = ("reverb", "echo", "noise", "crowd")
+
+
+def _clean_part(parts: dict):
+    """Из дорожек модели очистки выбирает «чистую»: «без реверберации», «сухую», «без шума»."""
+    for name, audio in parts.items():
+        compact = name.replace(" ", "").replace("-", "").replace("_", "")
+        # «noreverb», «no echo», «no_noise» — но не само слово «noise»
+        if compact.startswith("no") and any(compact[2:].startswith(word) for word in _DIRTY_WORDS):
+            return audio
+    for preferred in ("dry", "vocals", "clean"):
+        if preferred in parts:
+            return parts[preferred]
+    clean = [audio for name, audio in parts.items() if not any(word in name for word in _DIRTY_WORDS)]
+    return clean[0] if len(clean) == 1 else None
+
+
+def _average(results: list[dict]) -> dict:
+    """Среднее нескольких разделений с одинаковыми дорожками."""
+    if len(results) == 1:
+        return results[0]
+    names = [name for name in results[0] if all(name in result for result in results)]
+    length = min(len(result[name]) for result in results for name in names)
+    return {name: sum(result[name][:length] for result in results) / len(results) for name in names}
 
 
 def _restore_levels(reference, stems: dict) -> dict:

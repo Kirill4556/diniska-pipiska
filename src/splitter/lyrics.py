@@ -53,6 +53,26 @@ def save_lyrics(lrc: str, out_dir: Path, stem: str) -> tuple[Path, Path]:
     return txt_path, lrc_path
 
 
+def whisper_model_name() -> str:
+    from .core import gpu_available
+
+    # на процессоре большая модель слишком медленная
+    return "turbo" if gpu_available() else "small"
+
+
+def prefetch_whisper() -> None:
+    """Скачивает модель распознавания, не загружая её в видеопамять."""
+    import whisper
+
+    models = cache_dir() / "whisper"
+    models.mkdir(parents=True, exist_ok=True)
+    name = whisper_model_name()
+    try:
+        whisper._download(whisper._MODELS[name], str(models), False)
+    except Exception as exc:
+        raise SplitterError(f"Не удалось скачать модель распознавания текста: {exc}") from exc
+
+
 class Transcriber:
     """Загруженная модель Whisper."""
 
@@ -62,8 +82,7 @@ class Transcriber:
         from .core import gpu_available
 
         self._gpu = gpu_available()
-        # на процессоре большая модель слишком медленная
-        name = "turbo" if self._gpu else "small"
+        name = whisper_model_name()
         models = cache_dir() / "whisper"
         models.mkdir(exist_ok=True)
         try:

@@ -15,7 +15,9 @@ TRACK_TITLES = {
     "instrumental": "минус",
     "instrumental_backing": "минус с бэк-вокалом",
     "vocals": "вокал",
+    "vocals_clean": "вокал очищенный",
     "lead": "основной голос",
+    "lead_clean": "основной голос очищенный",
     "backing": "бэк-вокал",
     "drums": "ударные",
     "bass": "бас",
@@ -42,7 +44,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--out", type=Path, default=Path("result"), help="папка для результата (по умолчанию ./result)")
     parser.add_argument("-f", "--format", choices=FORMATS, default="mp3", help="формат выхода (по умолчанию mp3)")
     parser.add_argument("-b", "--bitrate", type=int, choices=BITRATES, default=320, help="битрейт mp3, кбит/с (по умолчанию 320)")
-    parser.add_argument("-q", "--quality", choices=("fast", "high"), default="high", help="fast — быстрее, high — качественнее (по умолчанию)")
+    parser.add_argument(
+        "-q",
+        "--quality",
+        choices=("fast", "high", "max"),
+        default="high",
+        help="fast — быстрее; high — качественнее (по умолчанию); max — две модели вместе, ещё чище, но вдвое дольше",
+    )
+    parser.add_argument(
+        "--clean-vocals",
+        action="store_true",
+        help="дополнительно сохранить вокал без эха, реверберации и шума (<имя>_vocals_clean, в режиме backing — _lead_clean)",
+    )
     parser.add_argument(
         "-p",
         "--preset",
@@ -70,7 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="с --lyrics: сначала искать готовый текст в LRCLIB (отправляются только исполнитель, название и длительность)",
     )
     parser.add_argument("--language",choices=("auto", "ru", "en"), default="auto", help="язык текста (по умолчанию определяется автоматически)")
-    parser.add_argument("--batch", action="store_true", help="обрабатывать папки целиком (включается автоматически, если передана папка)")
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="разделять заново, даже если этот файл уже обрабатывался с теми же настройками",
+    )
+    parser.add_argument("--batch",action="store_true", help="обрабатывать папки целиком (включается автоматически, если передана папка)")
     parser.add_argument("--version", action="version", version=f"splitter {__version__}")
     return parser
 
@@ -132,6 +150,7 @@ def run(args: argparse.Namespace) -> int:
         lyrics=args.lyrics,
         language=LANGUAGES[args.language],
         lyrics_online=args.lyrics_online,
+        clean_vocals=args.clean_vocals,
     )
     total = len(items)
     searched: set[int] = set()  # где уже искали текст в LRCLIB
@@ -158,7 +177,10 @@ def run(args: argparse.Namespace) -> int:
         elif event == "split":
             for name, path in data["outputs"].items():
                 print(f"  {TRACK_TITLES.get(name, name)}: {path}")
-            print(f"  готово за {data['seconds']} с")
+            if data.get("cached"):
+                print("  взято из кэша: этот файл уже обрабатывался с теми же настройками (--no-cache — заново)")
+            else:
+                print(f"  готово за {data['seconds']} с")
         elif event == "lyrics_model":
             print("Загружаю модель распознавания текста (при первом запуске она скачивается)...")
         elif event == "lyrics_start":
@@ -175,7 +197,7 @@ def run(args: argparse.Namespace) -> int:
             print(f"{label(data['index'])}\n  ! {data['message']}", file=sys.stderr)
 
     try:
-        failures = pipeline.run(items, args.out, options, emit)
+        failures = pipeline.run(items, args.out, options, emit, use_cache=not args.no_cache)
     except Exception as exc:
         log.write(f"ошибка: {type(exc).__name__}: {exc}")
         print(f"Журнал: {log.path}", file=sys.stderr)

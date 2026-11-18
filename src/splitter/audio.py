@@ -33,6 +33,8 @@ def mixer_tracks(names: list[str]) -> list[str]:
     """Какие дорожки показать в микшере: без тех, что сами составлены из других."""
     chosen = []
     for name in names:
+        if name.endswith("_clean"):  # очищенный голос — другой вариант того же голоса
+            continue
         parts = _SUMS.get(name)
         if parts and any(part in names for part in parts):
             continue

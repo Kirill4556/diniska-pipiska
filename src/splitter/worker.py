@@ -15,15 +15,23 @@ from pathlib import Path
 
 from .errors import SplitterError
 
-# сколько прогресс-баров tqdm библиотека показывает на один файл: (режим, качество)
+# сколько прогресс-баров tqdm библиотека показывает на один файл: (режим, качество); замерено
 _BARS_PER_FILE = {
     ("vocals", "fast"): 2,
     ("vocals", "high"): 1,
+    ("vocals", "max"): 2,
     ("stems", "fast"): 2,
     ("stems", "high"): 8,
+    ("stems", "max"): 8,
     ("backing", "fast"): 3,
     ("backing", "high"): 2,
+    ("backing", "max"): 3,
 }
+
+
+def bars_per_file(options) -> int:
+    # очистка вокала — ещё по одному бару на каждую из двух моделей
+    return _BARS_PER_FILE.get((options.mode, options.quality), 1) + (2 if options.clean_vocals else 0)
 
 
 class _Progress:
@@ -87,6 +95,31 @@ class _Progress:
         tqdm.__iter__, tqdm.update = patched_iter, patched_update
 
 
+def prefetch(job: dict, send) -> None:
+    """Мастер первого запуска (FR-25): проверка видеокарты и заранее скачанные модели.
+
+    Задание: {"action": "prefetch", "packs": ["fast", "high", ...], "lyrics": true}
+    События: device(gpu, name), prefetch_start(pack, index, total), model_download(value), prefetch_done(pack).
+    """
+    from .core import MODEL_PACKS, device_description, gpu_available, prefetch_model
+    from .lyrics import prefetch_whisper
+
+    send("device", gpu=gpu_available(), name=device_description())
+    progress = _Progress(send, 1)
+    progress.install()
+    steps = [pack for pack in job.get("packs", []) if pack in MODEL_PACKS]
+    if job.get("lyrics"):
+        steps.append("lyrics")
+    for number, pack in enumerate(steps):
+        send("prefetch_start", pack=pack, index=number, total=len(steps))
+        if pack == "lyrics":
+            prefetch_whisper()
+        else:
+            for model in MODEL_PACKS[pack][0]:
+                prefetch_model(model)
+        send("prefetch_done", pack=pack)
+
+
 def main() -> None:
     # события — в исходный stdout; всё, что печатают библиотеки, уводим в stderr
     events = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
@@ -98,7 +131,11 @@ def main() -> None:
         events.flush()
 
     try:
-        job = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+        job = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))  # -sig: PowerShell добавляет BOM
+        if job.get("action") == "prefetch":
+            prefetch(job, send)
+            send("finished")
+            return
 
         from . import pipeline
         from .core import Options
@@ -112,8 +149,9 @@ def main() -> None:
             lyrics=job.get("lyrics", False),
             language=job.get("language"),
             lyrics_online=job.get("lyrics_online", False),
+            clean_vocals=job.get("clean_vocals", False),
         )
-        progress = _Progress(send, _BARS_PER_FILE.get((options.mode, options.quality), 1))
+        progress = _Progress(send, bars_per_file(options))
         progress.install()
 
         def emit(event: str, **data) -> None:
@@ -125,7 +163,7 @@ def main() -> None:
                 progress.end()
             send(event, **data)
 
-        pipeline.run(job["inputs"], Path(job["out"]), options, emit)
+        pipeline.run(job["inputs"], Path(job["out"]), options, emit, use_cache=job.get("use_cache", True))
         send("finished")
     except SplitterError as exc:
         send("fatal", message=str(exc))

@@ -5,11 +5,12 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QActionGroup, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,16 +39,19 @@ from PySide6.QtWidgets import (
 )
 
 from . import presets, taskbar
+from .cards import SongDelegate
 from .cli import TRACK_TITLES
 from .core import AUDIO_EXTENSIONS, MIX_STEMS, Options, output_names, part_path
 from .download import COPYRIGHT_NOTICE, is_url
 from .ffmpeg import BITRATES, FORMATS
+from .media import format_length, song_info
 from .player_ui import LyricsEditor, MixerDialog
-from .report import RunLog, build_report
+from . import __version__
+from .report import RunLog, build_report, logs_dir
 
 ICON_PATH = Path(__file__).with_name("assets") / "icon.png"
 
-QUALITIES = (("high", "Качественно (дольше)"), ("fast", "Быстро"))
+QUALITIES = (("high", "Качественно"), ("fast", "Быстро"), ("max", "Максимум: две модели, вдвое дольше"))
 MODE_TITLES = (
     ("vocals", "Минус и вокал"),
     ("stems", "4 дорожки: вокал, ударные, бас, остальное"),
@@ -56,7 +60,10 @@ MODE_TITLES = (
 MIX_TITLES = {"drums": "ударные", "bass": "бас", "other": "остальное"}
 LANGUAGE_TITLES = ((None, "Язык: авто"), ("ru", "Русский"), ("en", "English"))
 CUSTOM_PRESET = "Свои настройки"
-TRACK_ORDER = ("instrumental", "instrumental_backing", "vocals", "lead", "backing", "drums", "bass", "other")
+THEMES = (("system", "Как в системе"), ("light", "Светлая"), ("dark", "Тёмная"))
+TRACK_ORDER = (
+    "instrumental", "instrumental_backing", "vocals", "vocals_clean", "lead", "lead_clean", "backing", "drums", "bass", "other",
+)
 
 PATH_ROLE = Qt.ItemDataRole.UserRole  # путь к исходному файлу или ссылка
 STATE_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -66,6 +73,10 @@ ERROR_ROLE = Qt.ItemDataRole.UserRole + 4  # текст ошибки для от
 FILE_ROLE = Qt.ItemDataRole.UserRole + 5  # у вложенных строк: путь к готовому файлу
 OUTPUTS_ROLE = Qt.ItemDataRole.UserRole + 6  # JSON {дорожка: путь} готовых дорожек песни
 LYRICS_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 7  # откуда текст: lrclib или whisper
+CACHED_ROLE = Qt.ItemDataRole.UserRole + 8  # дорожки взяты из кэша
+COVER_ROLE = Qt.ItemDataRole.UserRole + 9  # QPixmap обложки
+PEAKS_ROLE = Qt.ItemDataRole.UserRole + 10  # форма волны для карточки
+INFO_ROLE = Qt.ItemDataRole.UserRole + 11  # подпись под названием: длительность, формат, папка
 # SPLIT — дорожки уже записаны, ждём или распознаём текст: при отмене такие файлы остаются
 QUEUED, RUNNING, SPLIT, DONE, FAILED = "queued", "running", "split", "done", "failed"
 # частые события, которые не нужны в журнале
@@ -131,6 +142,7 @@ class QueueTree(QTreeWidget):
 class MainWindow(QMainWindow):
     worker_event = Signal(dict)
     worker_exited = Signal(int)
+    media_ready = Signal(str, object)
 
     def __init__(self):
         super().__init__()
@@ -154,12 +166,18 @@ class MainWindow(QMainWindow):
         self._taskbar: taskbar.TaskbarProgress | None = None
         self._tray: QSystemTrayIcon | None = None
         self._applying_preset = False
+        # очередь запоминается только в настоящем окне (restore_queue), не в тестах
+        self._remember_queue = False
+        self._media = ThreadPoolExecutor(max_workers=2, thread_name_prefix="splitter-media")
+        self._stored_queue: str | None = None
 
         self._build_ui()
+        self._build_menu()
         self._load_settings()
         self._fill_presets()
         self.worker_event.connect(self._on_event)
         self.worker_exited.connect(self._on_exit)
+        self.media_ready.connect(self._on_media)
         self._refresh()
 
     # ---------- интерфейс ----------
@@ -180,6 +198,10 @@ class MainWindow(QMainWindow):
         self.queue.customContextMenuRequested.connect(self._show_menu)
         self.queue.itemSelectionChanged.connect(self._refresh)
         self.queue.itemDoubleClicked.connect(self._on_double_click)
+        placeholder = QPixmap(str(ICON_PATH)) if ICON_PATH.is_file() else None
+        self.queue.setItemDelegateForColumn(
+            0, SongDelegate({"cover": COVER_ROLE, "peaks": PEAKS_ROLE, "info": INFO_ROLE}, placeholder, self.queue)
+        )
 
         self.hint = QLabel("Перетащите сюда песни или папки\n(mp3, wav, flac, m4a)")
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -252,6 +274,12 @@ class MainWindow(QMainWindow):
         for value in sorted(BITRATES, reverse=True):
             self.bitrate.addItem(f"{value} кбит/с", value)
         self.bitrate.currentIndexChanged.connect(self._settings_changed)
+        self.clean_box = QCheckBox("Очистить вокал от эха и шума (отдельный файл)")
+        self.clean_box.setToolTip("Дополнительно сохраняет голос без реверберации, эха и шума: <имя>_vocals_clean.\nДобавляет время на обработку.")
+        self.clean_box.toggled.connect(self._settings_changed)
+        quality_row = QHBoxLayout()
+        quality_row.addWidget(self.quality, 1)
+        quality_row.addWidget(self.clean_box)
         format_row = QHBoxLayout()
         format_row.addWidget(self.format)
         format_row.addWidget(self.bitrate)
@@ -286,7 +314,7 @@ class MainWindow(QMainWindow):
         form.addRow("Пресет:", preset_row)
         form.addRow("Режим:", self.mode)
         form.addRow(self.mix_label, self.mix_row)
-        form.addRow("Качество:", self.quality)
+        form.addRow("Качество:", quality_row)
         form.addRow("Формат:", format_row)
         form.addRow("Текст:", lyrics_row)
         form.addRow("Папка результата:", out_row)
@@ -323,8 +351,57 @@ class MainWindow(QMainWindow):
         central.setLayout(layout)
         self.setCentralWidget(central)
 
+    def _build_menu(self) -> None:
+        settings_menu = self.menuBar().addMenu("Настройки")
+        theme_menu = settings_menu.addMenu("Тема")
+        self.theme_group = QActionGroup(self)
+        for key, title in THEMES:
+            action = theme_menu.addAction(title)
+            action.setCheckable(True)
+            action.setData(key)
+            self.theme_group.addAction(action)
+        self.theme_group.triggered.connect(lambda action: self.set_theme(action.data()))
+        settings_menu.addSeparator()
+        settings_menu.addAction("Скачать модели заранее…", self.show_wizard)
+        settings_menu.addAction("Папка журналов",lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(logs_dir()))))
+        help_menu = self.menuBar().addMenu("Справка")
+        help_menu.addAction("О программе", self._about)
+
+    def show_wizard(self) -> None:
+        """Мастер: видеокарта, место на диске, предзагрузка моделей (FR-25)."""
+        from .wizard import FirstRunWizard
+
+        if self.running:
+            self.status.setText("Дождитесь конца обработки — потом можно скачать модели.")
+            return
+        FirstRunWizard(worker_command(), self).exec()
+        self._settings.setValue("wizard_done", "true")
+
+    def maybe_first_run(self) -> None:
+        if str(self._settings.value("wizard_done", "false")).lower() != "true":
+            self.show_wizard()
+
+    def set_theme(self, key: str) -> None:
+        """Тема: как в системе, светлая или тёмная (FR-21)."""
+        schemes = {"light": Qt.ColorScheme.Light, "dark": Qt.ColorScheme.Dark}
+        app = QApplication.instance()
+        if app is not None and hasattr(app.styleHints(), "setColorScheme"):
+            app.styleHints().setColorScheme(schemes.get(key, Qt.ColorScheme.Unknown))
+        for action in self.theme_group.actions():
+            action.setChecked(action.data() == key)
+        self._settings.setValue("theme", key)
+
+    def _about(self) -> None:
+        QMessageBox.about(
+            self,
+            "О программе",
+            f"<b>Splitter {__version__}</b><br>Делит песню на минус, вокал и другие дорожки. Вся обработка — на этом компьютере."
+            f"<br><br>Видеокарта: {self._device or 'определится при первом разделении'}",
+        )
+
     def _load_settings(self) -> None:
         value = self._settings.value
+        self.set_theme(str(value("theme", "system")))
         self.out_dir.setText(value("out_dir", str(Path.home() / "Music" / "Splitter")))
         self._applying_preset = True
         try:
@@ -338,6 +415,7 @@ class MainWindow(QMainWindow):
             self.lyrics_box.setChecked(str(value("lyrics", "false")).lower() == "true")
             self.language.setCurrentIndex(max(0, self.language.findData(value("language", "") or None)))
             self.online_box.setChecked(str(value("lyrics_online", "false")).lower() == "true")
+            self.clean_box.setChecked(str(value("clean_vocals", "false")).lower() == "true")
         finally:
             self._applying_preset = False
 
@@ -352,6 +430,7 @@ class MainWindow(QMainWindow):
         store("lyrics", "true" if self.lyrics_box.isChecked() else "false")
         store("language", self.language.currentData() or "")
         store("lyrics_online", "true" if self.online_box.isChecked() else "false")
+        store("clean_vocals", "true" if self.clean_box.isChecked() else "false")
 
     def _mix(self) -> list[str]:
         return [name for name, box in self.mix_boxes.items() if box.isChecked()]
@@ -431,6 +510,7 @@ class MainWindow(QMainWindow):
             self.mode,
             self.mix_row,
             self.quality,
+            self.clean_box,
             self.format,
             self.lyrics_box,
             self.out_dir,
@@ -449,6 +529,39 @@ class MainWindow(QMainWindow):
         self.report_button.setVisible(self._selected_error() is not None)
         self.start_button.setEnabled(not busy and pending)
         self.cancel_button.setEnabled(busy)
+        self._store_queue()
+
+    # ---------- незавершённая очередь (FR-30) ----------
+
+    def _store_queue(self) -> None:
+        """Запоминает необработанные песни, чтобы предложить их при следующем запуске."""
+        if not self._remember_queue:
+            return
+        unfinished = [item.data(0, PATH_ROLE) for item in self._items() if item.data(0, STATE_ROLE) != DONE]
+        value = json.dumps(unfinished, ensure_ascii=False)
+        if value != self._stored_queue:
+            self._stored_queue = value
+            self._settings.setValue("queue", value)
+
+    def restore_queue(self) -> int:
+        """Возвращает в очередь то, что не успели обработать в прошлый раз. Вызывается при запуске окна."""
+        try:
+            saved = json.loads(str(self._settings.value("queue", "[]")))
+        except ValueError:
+            saved = []
+        self._remember_queue = True
+        restored = 0
+        for key in saved if isinstance(saved, list) else []:
+            if not isinstance(key, str):
+                continue
+            if is_url(key):
+                restored += self._add_item(key, key)
+            elif Path(key).is_file():
+                restored += self._add_item(key, Path(key).name)
+        if restored:
+            self.status.setText(f"Возвращена незаконченная очередь с прошлого раза: {restored} шт. Нажмите «Разделить» или «Очистить».")
+        self._refresh()
+        return restored
 
     # ---------- пресеты ----------
 
@@ -495,6 +608,7 @@ class MainWindow(QMainWindow):
             "lyrics": self.lyrics_box.isChecked(),
             "language": self.language.currentData(),
             "lyrics_online": self.online_box.isChecked(),
+            "clean_vocals": self.clean_box.isChecked(),
         }
 
     def apply_settings(self, values: dict) -> None:
@@ -517,6 +631,8 @@ class MainWindow(QMainWindow):
                 self.language.setCurrentIndex(max(0, self.language.findData(values["language"])))
             if "lyrics_online" in values:
                 self.online_box.setChecked(bool(values["lyrics_online"]))
+            if "clean_vocals" in values:
+                self.clean_box.setChecked(bool(values["clean_vocals"]))
         finally:
             self._applying_preset = False
         self._refresh()
@@ -590,7 +706,34 @@ class MainWindow(QMainWindow):
         item.setToolTip(0, key)
         self.queue.addTopLevelItem(item)
         self._set_state(item, QUEUED, "В очереди")
+        self._describe(item)
         return True
+
+    def _describe(self, item: QTreeWidgetItem, duration: float | None = None) -> None:
+        """Подпись карточки; длительность и волна дозагружаются в фоне."""
+        key = item.data(0, PATH_ROLE)
+        if is_url(key):
+            item.setData(0, INFO_ROLE, "ссылка — скачается при обработке")
+            return
+        path = Path(key)
+        parts = [format_length(duration)] if duration else []
+        parts += [path.suffix.lstrip(".").lower(), path.parent.name]
+        item.setData(0, INFO_ROLE, " · ".join(part for part in parts if part))
+        if duration is None:
+            try:
+                self._media.submit(lambda: self.media_ready.emit(key, song_info(path)))
+            except RuntimeError:
+                pass  # окно закрывается
+
+    def _on_media(self, key: str, info) -> None:
+        for item in self._items():
+            if item.data(0, PATH_ROLE) == key:
+                item.setData(0, PEAKS_ROLE, info.peaks)
+                if info.cover:
+                    pixmap = QPixmap()
+                    if pixmap.loadFromData(info.cover):
+                        item.setData(0, COVER_ROLE, pixmap)
+                self._describe(item, info.duration or 0.0)
 
     def add_paths(self, paths: list[Path]) -> None:
         added = sum(self._add_item(str(file.resolve()), file.name) for file in expand_paths(paths))
@@ -770,6 +913,7 @@ class MainWindow(QMainWindow):
             item.setData(0, LYRICS_SOURCE_ROLE, None)
             item.setData(0, ERROR_ROLE, None)
             item.setData(0, OUTPUTS_ROLE, None)
+            item.setData(0, CACHED_ROLE, None)
             item.takeChildren()
         self._save_settings()
         self._units = {}
@@ -793,6 +937,7 @@ class MainWindow(QMainWindow):
             "lyrics": self.lyrics_box.isChecked(),
             "language": self.language.currentData(),
             "lyrics_online": self.lyrics_box.isChecked() and self.online_box.isChecked(),
+            "clean_vocals": self.clean_box.isChecked(),
         }
         if self._log is None:
             self._log = RunLog("gui")
@@ -885,6 +1030,7 @@ class MainWindow(QMainWindow):
             item.setData(0, PATH_ROLE, event["path"])
             item.setText(0, Path(event["path"]).name)
             item.setToolTip(0, event["path"])
+            self._describe(item)
             self._set_state(item, QUEUED, "Скачано, в очереди")
             self._current = None
         elif kind == "start":
@@ -903,7 +1049,10 @@ class MainWindow(QMainWindow):
             outputs = dict(sorted(event["outputs"].items(), key=lambda pair: TRACK_ORDER.index(pair[0]) if pair[0] in TRACK_ORDER else 99))
             self._add_file_rows(item, [(TRACK_TITLES.get(name, name), path) for name, path in outputs.items()])
             item.setData(0, OUTPUTS_ROLE, json.dumps(outputs, ensure_ascii=False))
-            waiting = "Дорожки готовы, текст — в очереди" if self._job.get("lyrics") else f"Дорожки готовы ({event['seconds']} с)"
+            took = "из кэша" if event.get("cached") else f"{event['seconds']} с"
+            waiting = "Дорожки готовы, текст — в очереди" if self._job.get("lyrics") else f"Дорожки готовы ({took})"
+            if event.get("cached"):
+                item.setData(0, CACHED_ROLE, True)
             self._set_state(item, SPLIT, waiting, "\n".join(outputs.values()))
             if len(self._batch) == 1:
                 item.setExpanded(True)
@@ -934,7 +1083,8 @@ class MainWindow(QMainWindow):
             lyrics = ""
             if item.data(0, LRC_ROLE):
                 lyrics = " + текст из LRCLIB" if item.data(0, LYRICS_SOURCE_ROLE) == "lrclib" else " + текст"
-            self._set_state(item, DONE, f"Готово{lyrics}")
+            cached = " (из кэша)" if item.data(0, CACHED_ROLE) else ""
+            self._set_state(item, DONE, f"Готово{lyrics}{cached}")
             self._current = None
             self._overall()
         elif kind == "error":
@@ -1037,7 +1187,9 @@ class MainWindow(QMainWindow):
         if is_url(source) or not self._job:
             return
         stem = item.data(0, STEM_ROLE) or Path(source).stem
-        options = Options(fmt=self._job["format"], mode=self._job["mode"], mix=tuple(self._job["mix"]))
+        options = Options(
+            fmt=self._job["format"], mode=self._job["mode"], mix=tuple(self._job["mix"]), clean_vocals=self._job.get("clean_vocals", False)
+        )
         out = Path(self._job["out"])
         for name in output_names(options):
             part_path(out / f"{stem}_{name}.{options.fmt}").unlink(missing_ok=True)
@@ -1056,6 +1208,7 @@ class MainWindow(QMainWindow):
         self._save_settings()
         if self._tray is not None:
             self._tray.hide()
+        self._media.shutdown(wait=False, cancel_futures=True)
         event.accept()
 
 
@@ -1073,8 +1226,10 @@ def main() -> None:
     if ICON_PATH.is_file():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()
+    window.restore_queue()
     window.add_paths([Path(arg) for arg in sys.argv[1:]])
     window.show()
+    QTimer.singleShot(400, window.maybe_first_run)
     sys.exit(app.exec())
 
 
