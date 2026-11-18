@@ -1,14 +1,15 @@
-"""Окно приложения (PySide6): очередь файлов, настройки, прогресс, отмена."""
+"""Окно приложения (PySide6): очередь файлов, пресеты, настройки, прогресс, отмена, готовые дорожки."""
 
 import json
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QMimeData, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -24,20 +25,27 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSystemTrayIcon,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from . import presets, taskbar
+from .cli import TRACK_TITLES
 from .core import AUDIO_EXTENSIONS, MIX_STEMS, Options, output_names, part_path
 from .download import COPYRIGHT_NOTICE, is_url
 from .ffmpeg import BITRATES, FORMATS
 from .lyrics import save_lyrics
+from .report import RunLog, build_report
+
+ICON_PATH = Path(__file__).with_name("assets") / "icon.png"
 
 QUALITIES = (("high", "Качественно (дольше)"), ("fast", "Быстро"))
 MODE_TITLES = (
@@ -47,11 +55,19 @@ MODE_TITLES = (
 )
 MIX_TITLES = {"drums": "ударные", "bass": "бас", "other": "остальное"}
 LANGUAGE_TITLES = ((None, "Язык: авто"), ("ru", "Русский"), ("en", "English"))
+CUSTOM_PRESET = "Свои настройки"
+TRACK_ORDER = ("instrumental", "instrumental_backing", "vocals", "lead", "backing", "drums", "bass", "other")
 
-PATH_ROLE = Qt.ItemDataRole.UserRole  # путь к файлу или ссылка
+PATH_ROLE = Qt.ItemDataRole.UserRole  # путь к исходному файлу или ссылка
 STATE_ROLE = Qt.ItemDataRole.UserRole + 1
 LRC_ROLE = Qt.ItemDataRole.UserRole + 2  # путь к .lrc, когда текст распознан
-QUEUED, RUNNING, DONE, FAILED = "queued", "running", "done", "failed"
+STEM_ROLE = Qt.ItemDataRole.UserRole + 3  # начало имён результатов (с учётом « (2)»)
+ERROR_ROLE = Qt.ItemDataRole.UserRole + 4  # текст ошибки для отчёта
+FILE_ROLE = Qt.ItemDataRole.UserRole + 5  # у вложенных строк: путь к готовому файлу
+# SPLIT — дорожки уже записаны, ждём или распознаём текст: при отмене такие файлы остаются
+QUEUED, RUNNING, SPLIT, DONE, FAILED = "queued", "running", "split", "done", "failed"
+# частые события, которые не нужны в журнале
+NOISY_EVENTS = {"progress", "lyrics_progress", "download_progress", "model_download"}
 
 
 def worker_command() -> list[str]:
@@ -75,6 +91,39 @@ def expand_paths(paths: list[Path]) -> list[Path]:
         elif path.suffix.lower() in AUDIO_EXTENSIONS:
             files.append(path)
     return files
+
+
+def reveal(path: Path) -> None:
+    """Открывает папку с выделенным файлом."""
+    if sys.platform == "win32" and path.exists():
+        subprocess.Popen(f'explorer /select,"{path}"')
+    else:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+
+
+def format_duration(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return "меньше минуты"
+    if minutes < 60:
+        return f"≈ {minutes} мин"
+    return f"≈ {minutes // 60} ч {minutes % 60:02d} мин"
+
+
+class QueueTree(QTreeWidget):
+    """Очередь. Готовые дорожки можно перетащить в проводник или другую программу."""
+
+    def mimeTypes(self) -> list[str]:
+        return ["text/uri-list"]
+
+    def mimeData(self, items) -> QMimeData:
+        files: list[str] = []
+        for item in items:
+            rows = [item] if item.parent() is not None else [item.child(i) for i in range(item.childCount())]
+            files += [row.data(0, FILE_ROLE) for row in rows if row.data(0, FILE_ROLE)]
+        data = QMimeData()
+        data.setUrls([QUrl.fromLocalFile(path) for path in dict.fromkeys(files) if Path(path).is_file()])
+        return data
 
 
 class LyricsDialog(QDialog):
@@ -111,7 +160,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Splitter — минус и вокал")
-        self.resize(820, 620)
+        if ICON_PATH.is_file():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
+        self.resize(860, 660)
         self.setAcceptDrops(True)
         self._settings = QSettings("splitter", "splitter")
         self._process: subprocess.Popen | None = None
@@ -122,9 +173,16 @@ class MainWindow(QMainWindow):
         self._cancelled = False
         self._fatal: str | None = None
         self._stderr_tail: deque[str] = deque(maxlen=15)
+        self._log: RunLog | None = None
+        self._device: str | None = None
+        self._clock: tuple[float, float] | None = None  # (время, доля) в начале расчёта — для оценки остатка
+        self._taskbar: taskbar.TaskbarProgress | None = None
+        self._tray: QSystemTrayIcon | None = None
+        self._applying_preset = False
 
         self._build_ui()
         self._load_settings()
+        self._fill_presets()
         self.worker_event.connect(self._on_event)
         self.worker_exited.connect(self._on_exit)
         self._refresh()
@@ -132,14 +190,19 @@ class MainWindow(QMainWindow):
     # ---------- интерфейс ----------
 
     def _build_ui(self) -> None:
-        self.queue = QTreeWidget()
+        self.queue = QueueTree()
         self.queue.setHeaderLabels(["Файл", "Состояние"])
-        self.queue.setRootIsDecorated(False)
         self.queue.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.queue.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.queue.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        self.queue.setColumnWidth(1, 210)
+        self.queue.setColumnWidth(1, 230)
         self.queue.header().setStretchLastSection(False)
+        self.queue.setExpandsOnDoubleClick(False)
+        self.queue.setDragEnabled(True)
+        self.queue.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.queue.setDefaultDropAction(Qt.DropAction.CopyAction)
+        self.queue.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.queue.customContextMenuRequested.connect(self._show_menu)
         self.queue.itemSelectionChanged.connect(self._refresh)
         self.queue.itemDoubleClicked.connect(self._on_double_click)
 
@@ -152,6 +215,8 @@ class MainWindow(QMainWindow):
         self.add_url_button = QPushButton("Добавить ссылку…")
         self.remove_button = QPushButton("Убрать")
         self.clear_button = QPushButton("Очистить")
+        self.report_button = QPushButton("Скопировать отчёт")
+        self.report_button.setToolTip("Скопировать описание ошибки, чтобы отправить разработчику")
         self.lyrics_button = QPushButton("Текст…")
         self.lyrics_button.setToolTip("Посмотреть и поправить распознанный текст выбранной песни")
         self.add_files_button.clicked.connect(self._choose_files)
@@ -159,23 +224,40 @@ class MainWindow(QMainWindow):
         self.add_url_button.clicked.connect(self._ask_url)
         self.remove_button.clicked.connect(self._remove_selected)
         self.clear_button.clicked.connect(self._clear)
+        self.report_button.clicked.connect(self._copy_selected_report)
         self.lyrics_button.clicked.connect(self._edit_lyrics)
         queue_buttons = QHBoxLayout()
         for button in (self.add_files_button, self.add_folder_button, self.add_url_button, self.remove_button, self.clear_button):
             queue_buttons.addWidget(button)
         queue_buttons.addStretch()
+        queue_buttons.addWidget(self.report_button)
         queue_buttons.addWidget(self.lyrics_button)
+
+        self.preset = QComboBox()
+        self.preset.setMinimumWidth(220)
+        self.preset.currentIndexChanged.connect(self._on_preset_chosen)
+        self.save_preset_button = QPushButton("Сохранить как…")
+        self.save_preset_button.setToolTip("Сохранить текущие настройки как свой пресет")
+        self.delete_preset_button = QPushButton("Удалить")
+        self.save_preset_button.clicked.connect(self._save_preset)
+        self.delete_preset_button.clicked.connect(self._delete_preset)
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(self.preset)
+        preset_row.addWidget(self.save_preset_button)
+        preset_row.addWidget(self.delete_preset_button)
+        preset_row.addStretch()
 
         self.mode = QComboBox()
         for key, title in MODE_TITLES:
             self.mode.addItem(title, key)
-        self.mode.currentIndexChanged.connect(self._refresh)
+        self.mode.currentIndexChanged.connect(self._settings_changed)
         self.mix_boxes = {name: QCheckBox(title) for name, title in MIX_TITLES.items()}
         self.mix_row = QWidget()
         mix_layout = QHBoxLayout(self.mix_row)
         mix_layout.setContentsMargins(0, 0, 0, 0)
         for box in self.mix_boxes.values():
             box.setChecked(True)
+            box.toggled.connect(self._settings_changed)
             mix_layout.addWidget(box)
         mix_layout.addStretch()
         self.mix_label = QLabel("Смешать в минус:")
@@ -183,22 +265,25 @@ class MainWindow(QMainWindow):
         self.quality = QComboBox()
         for key, title in QUALITIES:
             self.quality.addItem(title, key)
+        self.quality.currentIndexChanged.connect(self._settings_changed)
         self.format = QComboBox()
         self.format.addItems(FORMATS)
-        self.format.currentTextChanged.connect(self._refresh)
+        self.format.currentTextChanged.connect(self._settings_changed)
         self.bitrate = QComboBox()
         for value in sorted(BITRATES, reverse=True):
             self.bitrate.addItem(f"{value} кбит/с", value)
+        self.bitrate.currentIndexChanged.connect(self._settings_changed)
         format_row = QHBoxLayout()
         format_row.addWidget(self.format)
         format_row.addWidget(self.bitrate)
         format_row.addStretch()
 
         self.lyrics_box = QCheckBox("Распознать текст песни (.txt и .lrc с таймкодами)")
-        self.lyrics_box.toggled.connect(self._refresh)
+        self.lyrics_box.toggled.connect(self._settings_changed)
         self.language = QComboBox()
         for key, title in LANGUAGE_TITLES:
             self.language.addItem(title, key)
+        self.language.currentIndexChanged.connect(self._settings_changed)
         lyrics_row = QHBoxLayout()
         lyrics_row.addWidget(self.lyrics_box)
         lyrics_row.addWidget(self.language)
@@ -212,6 +297,7 @@ class MainWindow(QMainWindow):
         out_row.addWidget(self.browse_button)
 
         form = QFormLayout()
+        form.addRow("Пресет:", preset_row)
         form.addRow("Режим:", self.mode)
         form.addRow(self.mix_label, self.mix_row)
         form.addRow("Качество:", self.quality)
@@ -254,15 +340,19 @@ class MainWindow(QMainWindow):
     def _load_settings(self) -> None:
         value = self._settings.value
         self.out_dir.setText(value("out_dir", str(Path.home() / "Music" / "Splitter")))
-        self.mode.setCurrentIndex(max(0, self.mode.findData(value("mode", "vocals"))))
-        self.quality.setCurrentIndex(max(0, self.quality.findData(value("quality", "high"))))
-        self.format.setCurrentText(value("format", "mp3"))
-        self.bitrate.setCurrentIndex(max(0, self.bitrate.findData(int(value("bitrate", 320)))))
-        mix = str(value("mix", ",".join(MIX_STEMS))).split(",")
-        for name, box in self.mix_boxes.items():
-            box.setChecked(name in mix)
-        self.lyrics_box.setChecked(str(value("lyrics", "false")).lower() == "true")
-        self.language.setCurrentIndex(max(0, self.language.findData(value("language", "") or None)))
+        self._applying_preset = True
+        try:
+            self.mode.setCurrentIndex(max(0, self.mode.findData(value("mode", "vocals"))))
+            self.quality.setCurrentIndex(max(0, self.quality.findData(value("quality", "high"))))
+            self.format.setCurrentText(value("format", "mp3"))
+            self.bitrate.setCurrentIndex(max(0, self.bitrate.findData(int(value("bitrate", 320)))))
+            mix = str(value("mix", ",".join(MIX_STEMS))).split(",")
+            for name, box in self.mix_boxes.items():
+                box.setChecked(name in mix)
+            self.lyrics_box.setChecked(str(value("lyrics", "false")).lower() == "true")
+            self.language.setCurrentIndex(max(0, self.language.findData(value("language", "") or None)))
+        finally:
+            self._applying_preset = False
 
     def _save_settings(self) -> None:
         store = self._settings.setValue
@@ -285,12 +375,25 @@ class MainWindow(QMainWindow):
     def _items(self) -> list[QTreeWidgetItem]:
         return [self.queue.topLevelItem(i) for i in range(self.queue.topLevelItemCount())]
 
+    def _selected_songs(self) -> list[QTreeWidgetItem]:
+        """Выбранные песни (строка готовой дорожки считается своей песней)."""
+        songs = [item.parent() or item for item in self.queue.selectedItems()]
+        return list(dict.fromkeys(songs))
+
     def _selected_lrc(self) -> Path | None:
-        selected = self.queue.selectedItems()
-        if len(selected) == 1 and selected[0].data(0, LRC_ROLE):
-            path = Path(selected[0].data(0, LRC_ROLE))
+        songs = self._selected_songs()
+        if len(songs) == 1 and songs[0].data(0, LRC_ROLE):
+            path = Path(songs[0].data(0, LRC_ROLE))
             return path if path.is_file() else None
         return None
+
+    def _selected_error(self) -> QTreeWidgetItem | None:
+        songs = self._selected_songs()
+        return songs[0] if len(songs) == 1 and songs[0].data(0, ERROR_ROLE) else None
+
+    def _settings_changed(self, *_) -> None:
+        self._sync_preset()
+        self._refresh()
 
     def _refresh(self, *_) -> None:
         """Приводит доступность кнопок в соответствие с состоянием."""
@@ -302,16 +405,155 @@ class MainWindow(QMainWindow):
         self.queue.setVisible(bool(items))
         self.mix_label.setVisible(stems_mode)
         self.mix_row.setVisible(stems_mode)
-        settings = (self.mode, self.mix_row, self.quality, self.format, self.lyrics_box, self.out_dir, self.browse_button)
+        settings = (
+            self.preset,
+            self.save_preset_button,
+            self.mode,
+            self.mix_row,
+            self.quality,
+            self.format,
+            self.lyrics_box,
+            self.out_dir,
+            self.browse_button,
+        )
         for widget in (self.add_files_button, self.add_folder_button, self.add_url_button, *settings):
             widget.setEnabled(not busy)
+        self.delete_preset_button.setEnabled(not busy and self._user_preset_selected() is not None)
         self.bitrate.setEnabled(not busy and self.format.currentText() == "mp3")
         self.language.setEnabled(not busy and self.lyrics_box.isChecked())
         self.remove_button.setEnabled(not busy and bool(self.queue.selectedItems()))
         self.clear_button.setEnabled(not busy and bool(items))
         self.lyrics_button.setEnabled(self._selected_lrc() is not None)
+        self.report_button.setVisible(self._selected_error() is not None)
         self.start_button.setEnabled(not busy and pending)
         self.cancel_button.setEnabled(busy)
+
+    # ---------- пресеты ----------
+
+    def _user_presets(self) -> dict[str, dict]:
+        try:
+            stored = json.loads(str(self._settings.value("presets", "{}")))
+            return stored if isinstance(stored, dict) else {}
+        except ValueError:
+            return {}
+
+    def _store_user_presets(self, stored: dict[str, dict]) -> None:
+        self._settings.setValue("presets", json.dumps(stored, ensure_ascii=False))
+
+    def _fill_presets(self) -> None:
+        self.preset.blockSignals(True)
+        self.preset.clear()
+        self.preset.addItem(CUSTOM_PRESET, None)
+        for key, (title, _) in presets.BUILTIN.items():
+            self.preset.addItem(title, f"builtin:{key}")
+        for name in self._user_presets():
+            self.preset.addItem(f"★ {name}", f"user:{name}")
+        self.preset.blockSignals(False)
+        self._sync_preset()
+
+    def _preset_values(self, data) -> dict | None:
+        if not data:
+            return None
+        kind, _, key = data.partition(":")
+        if kind == "builtin":
+            return presets.builtin(key)
+        return self._user_presets().get(key)
+
+    def _user_preset_selected(self) -> str | None:
+        data = self.preset.currentData()
+        return data.partition(":")[2] if data and data.startswith("user:") else None
+
+    def current_settings(self) -> dict:
+        return {
+            "mode": self.mode.currentData(),
+            "mix": sorted(self._mix()),
+            "quality": self.quality.currentData(),
+            "format": self.format.currentText(),
+            "bitrate": self.bitrate.currentData(),
+            "lyrics": self.lyrics_box.isChecked(),
+            "language": self.language.currentData(),
+        }
+
+    def apply_settings(self, values: dict) -> None:
+        self._applying_preset = True
+        try:
+            if "mode" in values:
+                self.mode.setCurrentIndex(max(0, self.mode.findData(values["mode"])))
+            if "mix" in values:
+                for name, box in self.mix_boxes.items():
+                    box.setChecked(name in values["mix"])
+            if "quality" in values:
+                self.quality.setCurrentIndex(max(0, self.quality.findData(values["quality"])))
+            if "format" in values:
+                self.format.setCurrentText(values["format"])
+            if "bitrate" in values:
+                self.bitrate.setCurrentIndex(max(0, self.bitrate.findData(values["bitrate"])))
+            if "lyrics" in values:
+                self.lyrics_box.setChecked(bool(values["lyrics"]))
+            if "language" in values:
+                self.language.setCurrentIndex(max(0, self.language.findData(values["language"])))
+        finally:
+            self._applying_preset = False
+        self._refresh()
+
+    def _sync_preset(self) -> None:
+        """Показывает в списке пресет, совпадающий с текущими настройками, или «Свои настройки»."""
+        if self._applying_preset:
+            return
+        current = self.current_settings()
+        chosen = self._preset_values(self.preset.currentData())
+        if chosen is not None and presets.matches(chosen, current):
+            return
+        index = 0
+        for i in range(1, self.preset.count()):
+            values = self._preset_values(self.preset.itemData(i))
+            if values is not None and presets.matches(values, current):
+                index = i
+                break
+        self.preset.blockSignals(True)
+        self.preset.setCurrentIndex(index)
+        self.preset.blockSignals(False)
+
+    def _on_preset_chosen(self, *_) -> None:
+        values = self._preset_values(self.preset.currentData())
+        if values is not None:
+            self.apply_settings(values)
+        self._refresh()
+
+    def _save_preset(self) -> None:
+        name, ok = QInputDialog.getText(self, "Сохранить пресет", "Название пресета:", text=self._user_preset_selected() or "")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name == CUSTOM_PRESET or name in {title for title, _ in presets.BUILTIN.values()}:
+            QMessageBox.warning(self, "Сохранить пресет", "Так называется встроенный пресет — выберите другое название.")
+            return
+        stored = self._user_presets()
+        if name in stored:
+            answer = QMessageBox.question(self, "Сохранить пресет", f"Пресет «{name}» уже есть. Заменить?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        values = self.current_settings()
+        stored[name] = {key: values[key] for key in presets.SETTING_KEYS}
+        self._store_user_presets(stored)
+        self._fill_presets()
+        self.preset.blockSignals(True)
+        self.preset.setCurrentIndex(self.preset.findData(f"user:{name}"))
+        self.preset.blockSignals(False)
+        self.status.setText(f"Пресет «{name}» сохранён.")
+        self._refresh()
+
+    def _delete_preset(self) -> None:
+        name = self._user_preset_selected()
+        if name is None:
+            return
+        if QMessageBox.question(self, "Удалить пресет", f"Удалить пресет «{name}»?") != QMessageBox.StandardButton.Yes:
+            return
+        stored = self._user_presets()
+        stored.pop(name, None)
+        self._store_user_presets(stored)
+        self._fill_presets()
+        self._refresh()
 
     # ---------- очередь ----------
 
@@ -354,6 +596,14 @@ class MainWindow(QMainWindow):
         if tooltip is not None:
             item.setToolTip(1, tooltip)
 
+    def _add_file_rows(self, item: QTreeWidgetItem, files: list[tuple[str, str]]) -> None:
+        """Вложенные строки с готовыми файлами: двойной щелчок открывает, можно перетащить наружу."""
+        for title, path in files:
+            row = QTreeWidgetItem([f"{title} — {Path(path).name}", ""])
+            row.setData(0, FILE_ROLE, path)
+            row.setToolTip(0, path)
+            item.addChild(row)
+
     def _choose_files(self) -> None:
         pattern = " ".join(f"*{ext}" for ext in sorted(AUDIO_EXTENSIONS))
         names, _ = QFileDialog.getOpenFileNames(self, "Выберите песни", self._settings.value("last_dir", ""), f"Аудио ({pattern})")
@@ -373,7 +623,7 @@ class MainWindow(QMainWindow):
             self.out_dir.setText(name)
 
     def _remove_selected(self) -> None:
-        for item in self.queue.selectedItems():
+        for item in self._selected_songs():
             self.queue.takeTopLevelItem(self.queue.indexOfTopLevelItem(item))
         self._refresh()
 
@@ -390,23 +640,76 @@ class MainWindow(QMainWindow):
         else:
             self.status.setText("Папка результата пока не создана.")
 
-    def _edit_lyrics(self) -> None:
-        lrc = self._selected_lrc()
+    def _open_file(self, path: Path) -> None:
+        if path.suffix.lower() in (".lrc", ".txt") and path.with_suffix(".lrc").is_file():
+            self._edit_lyrics(path.with_suffix(".lrc"))
+        elif path.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        else:
+            self.status.setText(f"Файл не найден: {path.name} — возможно, его переместили или удалили.")
+
+    def _edit_lyrics(self, lrc: Path | None = None) -> None:
+        lrc = lrc or self._selected_lrc()
         if lrc is not None and LyricsDialog(lrc, self).exec():
             self.status.setText(f"Текст сохранён: {lrc.with_suffix('.txt').name} и {lrc.name}.")
 
-    def _on_double_click(self, *_) -> None:
-        if self._selected_lrc() is not None:
-            self._edit_lyrics()
+    def _on_double_click(self, item: QTreeWidgetItem, *_) -> None:
+        if item.data(0, FILE_ROLE):
+            self._open_file(Path(item.data(0, FILE_ROLE)))
+        elif item.childCount():
+            item.setExpanded(not item.isExpanded())
         else:
             self._open_output()
 
+    def _show_menu(self, position) -> None:
+        item = self.queue.itemAt(position)
+        if item is None:
+            return
+        menu = QMenu(self)
+        file = item.data(0, FILE_ROLE)
+        if file:
+            path = Path(file)
+            menu.addAction("Открыть", lambda: self._open_file(path))
+            menu.addAction("Показать в папке", lambda: reveal(path))
+            menu.addAction("Скопировать путь", lambda: QApplication.clipboard().setText(str(path)))
+        else:
+            first = item.child(0).data(0, FILE_ROLE) if item.childCount() else None
+            if first:
+                menu.addAction("Показать в папке", lambda: reveal(Path(first)))
+            if item.data(0, LRC_ROLE):
+                menu.addAction("Текст…", lambda: self._edit_lyrics(Path(item.data(0, LRC_ROLE))))
+            if item.data(0, ERROR_ROLE):
+                menu.addAction("Скопировать отчёт об ошибке", lambda: self._copy_report(item.data(0, ERROR_ROLE)))
+            if self._log is not None:
+                log_path = self._log.path
+                menu.addAction("Открыть журнал", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path))))
+            if not self.running:
+                menu.addSeparator()
+                menu.addAction("Убрать из очереди", self._remove_selected)
+        if menu.actions():
+            menu.exec(self.queue.viewport().mapToGlobal(position))
+
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls() and not self.running:
+        # свои строки (готовые дорожки) обратно в очередь не принимаем
+        if event.mimeData().hasUrls() and event.source() is None and not self.running:
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:
-        self.add_paths([Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()])
+        if event.source() is None:
+            self.add_paths([Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()])
+
+    # ---------- отчёт об ошибке ----------
+
+    def _copy_report(self, message: str) -> None:
+        settings = {key: value for key, value in self._job.items() if key not in ("inputs", "out")}
+        report = build_report(message, settings, self._device, self._log.tail() if self._log else [])
+        QApplication.clipboard().setText(report)
+        self.status.setText("Отчёт скопирован — вставьте его в сообщение разработчику.")
+
+    def _copy_selected_report(self) -> None:
+        item = self._selected_error()
+        if item is not None:
+            self._copy_report(item.data(0, ERROR_ROLE))
 
     # ---------- обработка ----------
 
@@ -423,13 +726,17 @@ class MainWindow(QMainWindow):
         for item in self._batch:
             self._set_state(item, QUEUED, "В очереди", "")
             item.setData(0, LRC_ROLE, None)
+            item.setData(0, ERROR_ROLE, None)
+            item.takeChildren()
         self._save_settings()
         self._units = {}
         self._current = None
         self._cancelled = False
         self._fatal = None
+        self._clock = None
         self._stderr_tail.clear()
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
         self.status.setText("Запуск…")
 
         self._job = {
@@ -443,6 +750,14 @@ class MainWindow(QMainWindow):
             "lyrics": self.lyrics_box.isChecked(),
             "language": self.language.currentData(),
         }
+        if self._log is None:
+            self._log = RunLog("gui")
+        self._log.write(f"задание: {json.dumps(self._job, ensure_ascii=False)}")
+        if self._taskbar is None:
+            self._taskbar = taskbar.TaskbarProgress(int(self.winId()))
+        self._taskbar.set_state(taskbar.NORMAL)
+        self._taskbar.set_value(0, 1000)
+
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         process = subprocess.Popen(
             worker_command(),
@@ -455,7 +770,7 @@ class MainWindow(QMainWindow):
         process.stdin.write(json.dumps(self._job).encode("utf-8"))
         process.stdin.close()
         threading.Thread(target=self._read_events, args=(process,), daemon=True).start()
-        threading.Thread(target=self._read_stderr, args=(process,), daemon=True).start()
+        threading.Thread(target=self._read_stderr, args=(process, self._log), daemon=True).start()
         self._refresh()
 
     def _read_events(self, process: subprocess.Popen) -> None:
@@ -466,9 +781,11 @@ class MainWindow(QMainWindow):
                 continue
         self.worker_exited.emit(process.wait())
 
-    def _read_stderr(self, process: subprocess.Popen) -> None:
+    def _read_stderr(self, process: subprocess.Popen, log: RunLog) -> None:
         for line in process.stderr:
-            self._stderr_tail.append(line.decode("utf-8", errors="replace").rstrip())
+            text = line.decode("utf-8", errors="replace").rstrip()
+            self._stderr_tail.append(text)
+            log.write(f"| {text}")
 
     def cancel(self) -> None:
         if self._process is not None:
@@ -481,16 +798,32 @@ class MainWindow(QMainWindow):
 
     def _overall(self, fraction: float = 0.0) -> None:
         total = len(self._batch) * self._units_per_file()
-        self.progress.setValue(int(1000 * min(sum(self._units.values()) + fraction, total) / total))
+        share = min(sum(self._units.values()) + fraction, total) / total
+        self.progress.setValue(int(1000 * share))
+        if self._taskbar is not None:
+            self._taskbar.set_value(int(1000 * share), 1000)
+        # оставшееся время — по скорости с начала расчёта (загрузку моделей не считаем)
+        now = time.monotonic()
+        if self._clock is None:
+            self._clock = (now, share)
+            return
+        started, base = self._clock
+        elapsed, gained = now - started, share - base
+        if elapsed > 15 and gained > 0.02 and share < 1:
+            self.progress.setFormat(f"%p%  ·  осталось {format_duration(elapsed * (1 - share) / gained)}")
 
     def _on_event(self, event: dict) -> None:
         kind = event.get("event")
         index = event.get("index")
         item = self._batch[index] if index is not None else None
         position = f"{index + 1} из {len(self._batch)}" if index is not None else ""
+        if self._log is not None and kind not in NOISY_EVENTS:
+            self._log.write(f"{kind} {json.dumps({k: v for k, v in event.items() if k != 'event'}, ensure_ascii=False)}")
 
-        if kind == "device" and not event["gpu"]:
-            self.status.setText("Подходящая видеокарта NVIDIA не найдена — считаю на процессоре, один трек может занять до 10 минут.")
+        if kind == "device":
+            self._device = event.get("name")
+            if not event["gpu"]:
+                self.status.setText("Подходящая видеокарта NVIDIA не найдена — считаю на процессоре, один трек может занять до 10 минут.")
         elif kind == "model":
             self.status.setText("Загружаю модель (при первом запуске она скачивается)…")
         elif kind == "lyrics_model":
@@ -512,28 +845,37 @@ class MainWindow(QMainWindow):
             self._current = None
         elif kind == "start":
             self._current = item
+            item.setData(0, STEM_ROLE, event.get("stem"))
             self._set_state(item, RUNNING, "Обработка… 0%")
             self.queue.scrollToItem(item)
             self.status.setText(f"Обрабатываю {position}: {item.text(0)}")
+            self._overall()
         elif kind == "progress":
             self._set_state(item, RUNNING, f"Обработка… {event['value']:.0%}")
             self._overall(event["value"])
         elif kind == "split":
             self._units[index] = 1
-            self._set_state(item, RUNNING, f"Дорожки готовы ({event['seconds']} с)", "\n".join(event["outputs"].values()))
+            # Qt при передаче события сортирует ключи — возвращаем порядок: минус и вокал первыми
+            outputs = dict(sorted(event["outputs"].items(), key=lambda pair: TRACK_ORDER.index(pair[0]) if pair[0] in TRACK_ORDER else 99))
+            self._add_file_rows(item, [(TRACK_TITLES.get(name, name), path) for name, path in outputs.items()])
+            waiting = "Дорожки готовы, текст — в очереди" if self._job.get("lyrics") else f"Дорожки готовы ({event['seconds']} с)"
+            self._set_state(item, SPLIT, waiting, "\n".join(outputs.values()))
+            if len(self._batch) == 1:
+                item.setExpanded(True)
             self._current = None
             self._overall()
         elif kind == "lyrics_start":
             self._current = item
-            self._set_state(item, RUNNING, "Распознаю текст… 0%")
+            self._set_state(item, SPLIT, "Распознаю текст… 0%")
             self.queue.scrollToItem(item)
             self.status.setText(f"Распознаю текст {position}: {item.text(0)}")
         elif kind == "lyrics_progress":
-            self._set_state(item, RUNNING, f"Распознаю текст… {event['value']:.0%}")
+            self._set_state(item, SPLIT, f"Распознаю текст… {event['value']:.0%}")
             self._overall(event["value"])
         elif kind == "lyrics":
             item.setData(0, LRC_ROLE, event["lrc"])
             item.setToolTip(1, f"{item.toolTip(1)}\n{event['txt']}\n{event['lrc']}")
+            self._add_file_rows(item, [("текст", event["txt"]), ("текст с таймкодами", event["lrc"])])
         elif kind == "done":
             self._units[index] = self._units_per_file()
             self._set_state(item, DONE, "Готово + текст" if item.data(0, LRC_ROLE) else "Готово")
@@ -541,18 +883,34 @@ class MainWindow(QMainWindow):
             self._overall()
         elif kind == "error":
             self._units[index] = self._units_per_file()
-            self._set_state(item, FAILED, "Ошибка", event["message"])
+            item.setData(0, ERROR_ROLE, event["message"])
+            if item.data(0, STATE_ROLE) == SPLIT:  # дорожки есть, не вышел только текст
+                self._set_state(item, DONE, "Готово, текст не распознан", event["message"])
+            else:
+                self._set_state(item, FAILED, "Ошибка", event["message"])
             self._current = None
             self._overall()
         elif kind == "fatal":
             self._fatal = event["message"]
+        self._refresh()
 
     def _on_exit(self, code: int) -> None:
         self._process = None
         interrupted = self._current
         self._current = None
-        if interrupted is not None:
+        if interrupted is not None and interrupted.data(0, STATE_ROLE) == RUNNING:
             self._remove_partial(interrupted)
+        self.progress.setFormat("%p%")
+        if self._log is not None:
+            self._log.write(f"обработчик завершился, код {code}{', отменено' if self._cancelled else ''}")
+
+        # у файлов, где дорожки уже записаны, результат сохраняется — не вышел только текст
+        reason = "отменено" if self._cancelled else "прервано"
+        for item in self._batch:
+            if item.data(0, STATE_ROLE) == SPLIT:
+                note = "без текста" if self._job.get("lyrics") else ""
+                self._set_state(item, DONE, f"Готово{', ' + note if note else ''} ({reason})")
+
         unfinished = [item for item in self._batch if item.data(0, STATE_ROLE) not in (DONE, FAILED)]
         failed = [item for item in self._batch if item.data(0, STATE_ROLE) == FAILED]
         done = [item for item in self._batch if item.data(0, STATE_ROLE) == DONE]
@@ -563,32 +921,70 @@ class MainWindow(QMainWindow):
                 if item.data(0, STATE_ROLE) == RUNNING:  # начатые; нетронутые остаются «В очереди»
                     self._set_state(item, QUEUED, "Отменено")
             self.status.setText(f"Отменено. {summary}")
+            self._taskbar_state(taskbar.NONE)
         elif self._fatal or code != 0 or unfinished:
             message = self._fatal or "Обработчик неожиданно завершился.\n" + "\n".join(self._stderr_tail)
             for item in unfinished:
+                item.setData(0, ERROR_ROLE, message)
                 self._set_state(item, FAILED, "Ошибка", message)
             self.status.setText("Обработка прервана из-за ошибки.")
-            QMessageBox.critical(self, "Ошибка", message)
+            self._taskbar_state(taskbar.ERROR)
+            self._show_fatal(message)
         else:
             self.progress.setValue(1000)
             if failed:
-                summary += f" С ошибкой: {len(failed)} — наведите курсор на «Ошибка», чтобы увидеть причину."
+                summary += f" С ошибкой: {len(failed)} — выберите песню и нажмите «Скопировать отчёт», чтобы отправить разработчику."
             elif self._job.get("lyrics"):
                 summary += " Чтобы поправить текст, выберите песню и нажмите «Текст…»."
             else:
-                summary += " Файлы в папке результата."
+                summary += " Готовые дорожки — под каждой песней: двойной щелчок открывает, можно перетащить в другую программу."
             self.status.setText(summary)
+            self._taskbar_state(taskbar.ERROR if failed else taskbar.NONE)
+            self._notify(f"Готово: {len(done)} из {len(self._batch)}" + (f", с ошибкой: {len(failed)}" if failed else ""))
         self._refresh()
+
+    def _taskbar_state(self, state: int) -> None:
+        if self._taskbar is not None:
+            self._taskbar.set_state(state)
+
+    def _notify(self, text: str) -> None:
+        """Сообщает об окончании, если пользователь ушёл в другое окно."""
+        if self.isActiveWindow():
+            return
+        QApplication.alert(self)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self._tray is None:
+            self._tray = QSystemTrayIcon(self.windowIcon(), self)
+            self._tray.messageClicked.connect(self._bring_to_front)
+            self._tray.activated.connect(self._bring_to_front)
+        self._tray.show()
+        self._tray.showMessage("Splitter", text, self.windowIcon(), 10000)
+        QTimer.singleShot(30000, self._tray.hide)
+
+    def _bring_to_front(self, *_) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _show_fatal(self, message: str) -> None:
+        box = QMessageBox(QMessageBox.Icon.Critical, "Ошибка", message, parent=self)
+        copy = box.addButton("Скопировать отчёт", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Ok)
+        box.exec()
+        if box.clickedButton() is copy:
+            self._copy_report(message)
 
     def _remove_partial(self, item: QTreeWidgetItem) -> None:
         """Убирает недописанные .part после отмены или сбоя."""
         source = item.data(0, PATH_ROLE)
         if is_url(source) or not self._job:
             return
+        stem = item.data(0, STEM_ROLE) or Path(source).stem
         options = Options(fmt=self._job["format"], mode=self._job["mode"], mix=tuple(self._job["mix"]))
         out = Path(self._job["out"])
         for name in output_names(options):
-            part_path(out / f"{Path(source).stem}_{name}.{options.fmt}").unlink(missing_ok=True)
+            part_path(out / f"{stem}_{name}.{options.fmt}").unlink(missing_ok=True)
 
     def closeEvent(self, event) -> None:
         if self.running:
@@ -599,14 +995,27 @@ class MainWindow(QMainWindow):
             process, interrupted = self._process, self._current
             self.cancel()
             process.wait()
-            if interrupted is not None:
+            if interrupted is not None and interrupted.data(0, STATE_ROLE) == RUNNING:
                 self._remove_partial(interrupted)
         self._save_settings()
+        if self._tray is not None:
+            self._tray.hide()
         event.accept()
 
 
 def main() -> None:
+    if sys.platform == "win32":
+        # своя группа на панели задач — с нашей иконкой, а не python.exe
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Splitter.Splitter")
+        except Exception:
+            pass
     app = QApplication(sys.argv)
+    app.setApplicationName("Splitter")
+    if ICON_PATH.is_file():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()
     window.add_paths([Path(arg) for arg in sys.argv[1:]])
     window.show()

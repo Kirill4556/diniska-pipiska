@@ -13,6 +13,8 @@ for package in ("audio_separator", "whisper", "yt_dlp_ejs", "imageio_ffmpeg", "l
 # audio-separator узнаёт свою версию через метаданные пакета
 for dist in ("audio-separator", "torch", "onnxruntime", "tqdm", "requests", "packaging", "numpy", "regex"):
     datas += copy_metadata(dist)
+# иконка окна (packaging/make_icon.py)
+datas += [("../src/splitter/assets", "splitter/assets")]
 
 a = Analysis(
     ["entry_gui.py", "entry_cli.py"],
@@ -45,6 +47,7 @@ gui = EXE(
     exclude_binaries=True,
     name="Splitter",
     console=False,
+    icon="icon.ico",
     upx=False,
 )
 cli = EXE(
@@ -53,6 +56,7 @@ cli = EXE(
     exclude_binaries=True,
     name="splitter-cli",
     console=True,
+    icon="icon.ico",
     upx=False,
 )
 COLLECT(gui, cli, a.binaries, a.datas, name="Splitter", upx=False)

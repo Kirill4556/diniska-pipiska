@@ -22,6 +22,7 @@ SolidCompression=no
 DiskSpanning=yes
 DiskSliceSize=max
 UninstallDisplayIcon={app}\Splitter.exe
+SetupIconFile=icon.ico
 WizardStyle=modern
 
 [Languages]

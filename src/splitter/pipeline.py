@@ -1,10 +1,10 @@
 """Общий конвейер для CLI и GUI: ссылки -> разделение -> текст.
 
 О ходе работы сообщает через emit(event, **data). События:
-    device(gpu)                         — есть ли видеокарта
+    device(gpu, name)                   — годится ли видеокарта и её описание
     download_start(index) / download_progress(index, value) / downloaded(index, path)
     model                               — загружается модель разделения
-    start(index)                        — началось разделение файла
+    start(index, stem)                  — началось разделение файла; stem — начало имён результатов
     split(index, outputs, seconds)      — дорожки готовы
     lyrics_model / lyrics_start(index) / lyrics(index, txt, lrc)
     done(index)                         — по файлу сделано всё
@@ -14,7 +14,7 @@
 import time
 from pathlib import Path
 
-from .core import Options, Splitter, gpu_available
+from .core import Options, Splitter, device_description, gpu_available, unique_stems
 from .download import download, is_url
 from .errors import SplitterError
 
@@ -22,7 +22,7 @@ from .errors import SplitterError
 def run(inputs: list[str], out: Path, options: Options, emit) -> int:
     """Обрабатывает входы (пути или ссылки). Возвращает число неудач."""
     options.validate()
-    emit("device", gpu=gpu_available())
+    emit("device", gpu=gpu_available(), name=device_description())
     failed: set[int] = set()
 
     def fail(index: int, exc: Exception) -> None:
@@ -45,14 +45,15 @@ def run(inputs: list[str], out: Path, options: Options, emit) -> int:
     if not sources:
         return len(failed)
 
+    stems = dict(zip(sources, unique_stems(list(sources.values()))))
     vocals: dict[int, Path] = {}
     emit("model")
     with Splitter(options) as splitter:
         for index, src in sources.items():
-            emit("start", index=index)
+            emit("start", index=index, stem=stems[index])
             started = time.monotonic()
             try:
-                result = splitter.split(src, out, keep_vocals=options.lyrics)
+                result = splitter.split(src, out, keep_vocals=options.lyrics, stem=stems[index])
             except SplitterError as exc:
                 fail(index, exc)
                 continue
@@ -82,7 +83,7 @@ def run(inputs: list[str], out: Path, options: Options, emit) -> int:
                 emit("lyrics_start", index=index)
                 try:
                     lines = transcriber.transcribe(wav, options.language)
-                    txt, lrc = save_lyrics(format_lrc(lines), out, sources[index].stem)
+                    txt, lrc = save_lyrics(format_lrc(lines), out, stems[index])
                 except SplitterError as exc:
                     fail(index, exc)
                     continue

@@ -7,6 +7,7 @@ from pathlib import Path
 from . import __version__
 from .errors import SplitterError
 from .ffmpeg import BITRATES, FORMATS
+from .presets import BUILTIN, builtin
 
 MODE_CHOICES = ("vocals", "stems", "backing")
 MIX_CHOICES = ("drums", "bass", "other")
@@ -43,16 +44,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-b", "--bitrate", type=int, choices=BITRATES, default=320, help="битрейт mp3, кбит/с (по умолчанию 320)")
     parser.add_argument("-q", "--quality", choices=("fast", "high"), default="high", help="fast — быстрее, high — качественнее (по умолчанию)")
     parser.add_argument(
+        "-p",
+        "--preset",
+        choices=tuple(BUILTIN),
+        help="готовый набор: "
+        + "; ".join(f"{key} — {title.lower()}" for key, (title, _) in BUILTIN.items())
+        + ". Явные --mode и --mix важнее пресета",
+    )
+    parser.add_argument(
         "-m",
         "--mode",
         choices=MODE_CHOICES,
-        default="vocals",
         help="vocals — минус и вокал (по умолчанию); stems — вокал, ударные, бас, остальное; backing — основной голос и бэк-вокал отдельно",
     )
     parser.add_argument(
         "--mix",
         type=parse_mix,
-        default=MIX_CHOICES,
         metavar="СПИСОК",
         help="для --mode stems: что смешать в минус, через запятую из drums,bass,other (по умолчанию все; none — не делать минус)",
     )
@@ -61,6 +68,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch", action="store_true", help="обрабатывать папки целиком (включается автоматически, если передана папка)")
     parser.add_argument("--version", action="version", version=f"splitter {__version__}")
     return parser
+
+
+def resolve_mode(args: argparse.Namespace) -> tuple[str, tuple[str, ...]]:
+    """Режим и состав минуса: явные параметры, иначе пресет, иначе по умолчанию."""
+    preset = builtin(args.preset) if args.preset else {}
+    mode = args.mode or preset.get("mode", "vocals")
+    mix = args.mix if args.mix is not None else tuple(preset.get("mix", MIX_CHOICES))
+    return mode, mix
 
 
 def collect_inputs(inputs: list[str]) -> list[str]:
@@ -97,26 +112,32 @@ def run(args: argparse.Namespace) -> int:
     from .core import Options
     from .download import COPYRIGHT_NOTICE, is_url
     from .lyrics import LANGUAGES
+    from .report import RunLog
 
     if any(is_url(item) for item in items):
         print(f"! {COPYRIGHT_NOTICE}", file=sys.stderr)
 
+    mode, mix = resolve_mode(args)
     options = Options(
         fmt=args.format,
         bitrate=args.bitrate,
         quality=args.quality,
-        mode=args.mode,
-        mix=args.mix,
+        mode=mode,
+        mix=mix,
         lyrics=args.lyrics,
         language=LANGUAGES[args.language],
     )
     total = len(items)
+    log = RunLog("cli")
+    log.write(f"задание: {total} шт., {options}")
 
     def label(index: int) -> str:
         name = items[index] if is_url(items[index]) else Path(items[index]).name
         return f"[{index + 1}/{total}] {name}"
 
     def emit(event: str, **data) -> None:
+        if event != "download_progress":
+            log.write(f"{event} {data}")
         if event == "device" and not data["gpu"]:
             print("! Подходящий GPU (CUDA) не найден — работаю на CPU, трек может занять до 10 минут.", file=sys.stderr)
         elif event == "download_start":
@@ -141,9 +162,14 @@ def run(args: argparse.Namespace) -> int:
         elif event == "error":
             print(f"{label(data['index'])}\n  ! {data['message']}", file=sys.stderr)
 
-    failures = pipeline.run(items, args.out, options, emit)
+    try:
+        failures = pipeline.run(items, args.out, options, emit)
+    except Exception as exc:
+        log.write(f"ошибка: {type(exc).__name__}: {exc}")
+        print(f"Журнал: {log.path}", file=sys.stderr)
+        raise
     if failures:
-        print(f"Не обработано: {failures} из {total}.", file=sys.stderr)
+        print(f"Не обработано: {failures} из {total}. Журнал: {log.path}", file=sys.stderr)
         return 1
     return 0
 

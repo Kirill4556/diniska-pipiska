@@ -98,6 +98,47 @@ def gpu_available() -> bool:
     return usable
 
 
+def device_description() -> str:
+    """Видеокарта и драйвер одной строкой — для журнала и отчёта об ошибке."""
+    import subprocess
+
+    import torch
+
+    usable = gpu_available()
+    try:
+        if not torch.cuda.device_count():
+            return "видеокарта NVIDIA не найдена, расчёт на процессоре"
+        name = torch.cuda.get_device_name(0)
+        major, minor = torch.cuda.get_device_capability(0)
+    except Exception as exc:
+        return f"видеокарта не опознана ({type(exc).__name__}), расчёт на процессоре"
+    driver = ""
+    try:
+        flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+        query = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
+        driver = subprocess.run(query, capture_output=True, text=True, timeout=5, creationflags=flags).stdout.strip()
+    except Exception:
+        pass
+    status = "используется" if usable else "не поддерживается сборкой PyTorch, расчёт на процессоре"
+    details = f"sm_{major}{minor}, CUDA {torch.version.cuda}" + (f", драйвер {driver.splitlines()[0]}" if driver else "")
+    return f"{name} ({details}) — {status}"
+
+
+def unique_stems(paths: list[Path]) -> list[str]:
+    """Имена для результатов: одинаковые имена из разных папок получают суффикс « (2)», « (3)»…"""
+    taken: set[str] = set()
+    stems = []
+    for path in paths:
+        stem, number = path.stem, 2
+        candidate = stem
+        while candidate.lower() in taken:
+            candidate = f"{stem} ({number})"
+            number += 1
+        taken.add(candidate.lower())
+        stems.append(candidate)
+    return stems
+
+
 class Splitter:
     """Держит загруженные модели, чтобы в пакетном режиме не грузить их на каждый файл."""
 
@@ -157,12 +198,14 @@ class Splitter:
     def __exit__(self, *exc):
         self.close()
 
-    def split(self, src: Path, out_dir: Path, keep_vocals: bool = False) -> SplitResult:
+    def split(self, src: Path, out_dir: Path, keep_vocals: bool = False, stem: str | None = None) -> SplitResult:
+        """stem — начало имён выходных файлов (по умолчанию имя исходного файла)."""
         import librosa
         import numpy as np
         import soundfile as sf
 
         src = Path(src)
+        stem = stem or src.stem
         options = self.options
         if not src.is_file():
             raise SplitterError(f"Файл не найден: {src}")
@@ -213,7 +256,7 @@ class Splitter:
                 sf.write(result.vocals_wav, vocals * common, rate, subtype="PCM_16")
 
             # пишем во временные .part и подменяем разом: отмена не оставит половину результата
-            targets = {name: out_dir / f"{src.stem}_{name}.{options.fmt}" for name in tracks}
+            targets = {name: out_dir / f"{stem}_{name}.{options.fmt}" for name in tracks}
             try:
                 for name, audio in tracks.items():
                     wav = self._scratch / f"final_{name}.wav"

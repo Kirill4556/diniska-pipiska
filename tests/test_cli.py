@@ -8,17 +8,20 @@ import soundfile as sf
 
 from pathlib import Path
 
-from splitter.cli import build_parser, collect_inputs
-from splitter.core import Options, output_names
+from splitter.cli import build_parser, collect_inputs, resolve_mode
+from splitter.core import Options, output_names, unique_stems
 from splitter.errors import SplitterError
 from splitter.ffmpeg import encode, ensure_ffmpeg
 from splitter.lyrics import format_lrc, lrc_to_text, save_lyrics
+from splitter.presets import builtin, matches
+from splitter.report import KEEP_LOGS, RunLog, build_report
 
 
 def test_defaults():
     args = build_parser().parse_args(["song.mp3"])
-    assert (args.format, args.bitrate, args.quality, args.mode) == ("mp3", 320, "high", "vocals")
-    assert args.mix == ("drums", "bass", "other") and not args.lyrics and args.language == "auto"
+    assert (args.format, args.bitrate, args.quality) == ("mp3", 320, "high")
+    assert resolve_mode(args) == ("vocals", ("drums", "bass", "other"))
+    assert not args.lyrics and args.language == "auto"
 
 
 def test_mix_argument():
@@ -27,6 +30,47 @@ def test_mix_argument():
     assert parse(["s.mp3", "--mix", "none"]).mix == ()
     with pytest.raises(SystemExit):
         parse(["s.mp3", "--mix", "guitar"])
+
+
+def test_presets_and_explicit_arguments():
+    parse = build_parser().parse_args
+    assert resolve_mode(parse(["s.mp3", "--preset", "no-drums"])) == ("stems", ("bass", "other"))
+    assert resolve_mode(parse(["s.mp3", "-p", "backing"]))[0] == "backing"
+    # явные параметры важнее пресета
+    assert resolve_mode(parse(["s.mp3", "-p", "no-drums", "--mix", "drums"])) == ("stems", ("drums",))
+    assert resolve_mode(parse(["s.mp3", "-p", "no-bass", "-m", "vocals"]))[0] == "vocals"
+    with pytest.raises(SystemExit):
+        parse(["s.mp3", "--preset", "karaoke"])
+
+
+def test_preset_matching():
+    current = {"mode": "stems", "mix": ["other", "bass"], "quality": "fast"}
+    assert matches(builtin("no-drums"), current)
+    assert not matches(builtin("no-bass"), current)
+    assert matches(builtin("vocals"), {"mode": "vocals", "mix": []})  # состав минуса вне stems не важен
+
+
+def test_unique_stems_for_same_names(tmp_path):
+    paths = [tmp_path / "a" / "Song.mp3", tmp_path / "b" / "song.flac", tmp_path / "c" / "Song.mp3", tmp_path / "Other.mp3"]
+    assert unique_stems(paths) == ["Song", "song (2)", "Song (3)", "Other"]
+
+
+def test_report_hides_folders():
+    message = r"Не удалось обработать C:\Users\Кирилл\Music\Альбом\песня.mp3: ошибка в /home/user/music/x.wav"
+    report = build_report(message, {"mode": "vocals"}, "RTX 4060", [r"start C:\Users\Кирилл\a b\c.mp3"])
+    assert "Кирилл" not in report and "user" not in report
+    assert "песня.mp3" in report and "x.wav" in report and "c.mp3" in report
+    assert "RTX 4060" in report and "mode=vocals" in report
+
+
+def test_run_log_keeps_last_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPLITTER_CACHE", str(tmp_path))
+    for number in range(KEEP_LOGS + 2):
+        log = RunLog("test")
+        log.write(f"строка {number}")
+        log.write(" 45%|████▌     | 9/20 [00:01<00:01]")  # прогресс tqdm в журнал не попадает
+    assert len(list((tmp_path / "logs").glob("*.log"))) == KEEP_LOGS
+    assert log.tail()[-1].endswith(f"строка {KEEP_LOGS + 1}") and len(log.tail()) == 2
 
 
 def test_collect_inputs_scans_folders_and_keeps_urls(tmp_path):
