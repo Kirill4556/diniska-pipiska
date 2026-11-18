@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .errors import SplitterError
 from .ffmpeg import ensure_ffmpeg
+from .i18n import tr
 
 COPYRIGHT_NOTICE = (
     "Скачивайте только то, на что у вас есть права: свои записи, свободные лицензии "
@@ -46,11 +47,11 @@ def download(url: str, dest_dir: Path, on_progress=None) -> Path:
                 info = ydl.extract_info(url.strip(), download=True)
         except Exception as exc:
             detail = str(exc).replace("ERROR: ", "").strip() or type(exc).__name__
-            raise SplitterError(f"Не удалось скачать {url}: {detail}") from exc
+            raise SplitterError(tr("Не удалось скачать {0}: {1}").format(url, detail)) from exc
 
         downloaded = [p for p in tmp.iterdir() if p.is_file() and not p.name.endswith(".part")]
         if not downloaded:
-            raise SplitterError(f"По ссылке {url} не нашлось звука.")
+            raise SplitterError(tr("По ссылке {0} не нашлось звука.").format(url))
 
         title = info.get("track") or info.get("title") or "track"
         artist = info.get("artist") or info.get("uploader") or ""
@@ -61,7 +62,7 @@ def download(url: str, dest_dir: Path, on_progress=None) -> Path:
         result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             target.unlink(missing_ok=True)
-            raise SplitterError(f"Не удалось преобразовать скачанный файл в mp3: {result.stderr.strip()[-300:]}")
+            raise SplitterError(tr("Не удалось преобразовать скачанный файл в mp3: {0}").format(result.stderr.strip()[-300:]))
         return target
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

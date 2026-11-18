@@ -12,6 +12,7 @@ import numpy as np
 
 from .errors import SplitterError
 from .ffmpeg import encode, ensure_ffmpeg
+from .i18n import tr
 
 RATE = 44100
 # эти дорожки — сами суммы других, в микшер их не берём, чтобы не удвоить звук
@@ -25,7 +26,7 @@ def load(path: Path) -> np.ndarray:
     result = subprocess.run(command, capture_output=True, creationflags=flags)
     if result.returncode != 0 or not result.stdout:
         detail = result.stderr.decode("utf-8", errors="replace").strip()
-        raise SplitterError(f"Не удалось прочитать {Path(path).name}: {detail or 'пустой файл'}")
+        raise SplitterError(tr("Не удалось прочитать {0}: {1}").format(Path(path).name, detail or 'пустой файл'))
     return np.frombuffer(result.stdout, dtype=np.float32).reshape(-1, 2)
 
 
@@ -78,7 +79,7 @@ class MixPlayer:
 
     def __init__(self, tracks: dict[str, np.ndarray], original: np.ndarray | None = None):
         if not tracks:
-            raise SplitterError("Нет дорожек для прослушивания.")
+            raise SplitterError(tr("Нет дорожек для прослушивания."))
         self.length = min(len(audio) for audio in tracks.values())
         self._tracks = {name: audio[: self.length] for name, audio in tracks.items()}
         self._original = None
@@ -121,7 +122,7 @@ class MixPlayer:
             self._stream.start()
         except Exception as exc:
             self._stream = None
-            raise SplitterError(f"Не удалось открыть звуковое устройство: {exc}") from exc
+            raise SplitterError(tr("Не удалось открыть звуковое устройство: {0}").format(exc)) from exc
 
     def _fill(self, out, frames, _time, _status) -> None:
         with self._lock:

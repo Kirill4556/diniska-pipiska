@@ -10,6 +10,7 @@ from pathlib import Path
 from .errors import SplitterError
 from .ffmpeg import encode, ensure_ffmpeg
 from .paths import models_dir
+from .i18n import tr
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a"}
 
@@ -54,12 +55,12 @@ class Options:
 
     def validate(self) -> None:
         if self.mode not in MODES:
-            raise SplitterError(f"Неизвестный режим: {self.mode}. Доступно: {', '.join(MODES)}.")
+            raise SplitterError(tr("Неизвестный режим: {0}. Доступно: {1}.").format(self.mode, ', '.join(MODES)))
         if self.quality not in QUALITIES:
-            raise SplitterError(f"Неизвестное качество: {self.quality}. Доступно: {', '.join(QUALITIES)}.")
+            raise SplitterError(tr("Неизвестное качество: {0}. Доступно: {1}.").format(self.quality, ', '.join(QUALITIES)))
         unknown = set(self.mix) - set(MIX_STEMS)
         if unknown:
-            raise SplitterError(f"Неизвестные дорожки для минуса: {', '.join(sorted(unknown))}. Доступно: {', '.join(MIX_STEMS)}.")
+            raise SplitterError(tr("Неизвестные дорожки для минуса: {0}. Доступно: {1}.").format(', '.join(sorted(unknown)), ', '.join(MIX_STEMS)))
 
 
 @dataclass
@@ -128,11 +129,11 @@ def device_description() -> str:
     usable = gpu_available()
     try:
         if not torch.cuda.device_count():
-            return "видеокарта NVIDIA не найдена, расчёт на процессоре"
+            return tr("видеокарта NVIDIA не найдена, расчёт на процессоре")
         name = torch.cuda.get_device_name(0)
         major, minor = torch.cuda.get_device_capability(0)
     except Exception as exc:
-        return f"видеокарта не опознана ({type(exc).__name__}), расчёт на процессоре"
+        return tr("видеокарта не опознана ({0}), расчёт на процессоре").format(type(exc).__name__)
     driver = ""
     try:
         flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
@@ -140,8 +141,8 @@ def device_description() -> str:
         driver = subprocess.run(query, capture_output=True, text=True, timeout=5, creationflags=flags).stdout.strip()
     except Exception:
         pass
-    status = "используется" if usable else "не поддерживается сборкой PyTorch, расчёт на процессоре"
-    details = f"sm_{major}{minor}, CUDA {torch.version.cuda}" + (f", драйвер {driver.splitlines()[0]}" if driver else "")
+    status = tr("используется") if usable else tr("не поддерживается сборкой PyTorch, расчёт на процессоре")
+    details = f"sm_{major}{minor}, CUDA {torch.version.cuda}" + (tr(", драйвер {0}").format(driver.splitlines()[0]) if driver else "")
     return f"{name} ({details}) — {status}"
 
 
@@ -166,8 +167,8 @@ MODEL_PACKS = {
     "high": ((BS_ROFORMER,), 610),
     "stems": (("htdemucs_ft.yaml",), 320),
     "backing": ((KARAOKE_MODEL,), 871),
-    "max": ((KIM_ROFORMER,), 870),
-    "clean": (CLEAN_MODELS, 900),
+    "max": ((KIM_ROFORMER,), 871),
+    "clean": (CLEAN_MODELS, 1306),
 }
 
 
@@ -184,7 +185,7 @@ def prefetch_model(model: str) -> None:
         try:
             separator.load_model(model_filename=model)
         except Exception as exc:
-            raise SplitterError(f"Не удалось скачать модель {model}: {exc}") from exc
+            raise SplitterError(tr("Не удалось скачать модель {0}: {1}").format(model, exc)) from exc
         del separator
         gc.collect()
 
@@ -224,8 +225,7 @@ class Splitter:
             separator.load_model(model_filename=model)
         except Exception as exc:
             raise SplitterError(
-                f"Не удалось загрузить модель {model}: {exc}\n"
-                "При первом запуске нужен интернет — модель скачивается один раз."
+                tr("Не удалось загрузить модель {0}: {1}\nПри первом запуске нужен интернет — модель скачивается один раз.").format(model, exc)
             ) from exc
         return separator
 
@@ -260,7 +260,7 @@ class Splitter:
         stem = stem or src.stem
         options = self.options
         if not src.is_file():
-            raise SplitterError(f"Файл не найден: {src}")
+            raise SplitterError(tr("Файл не найден: {0}").format(src))
         out_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -268,7 +268,7 @@ class Splitter:
             for separator in self._main:
                 stems, rate = self._separate(separator, src)
                 if "vocals" not in stems or len(stems) < 2:
-                    raise SplitterError(f"Модель не вернула нужные дорожки для {src.name} (получено: {', '.join(stems) or 'ничего'}).")
+                    raise SplitterError(tr("Модель не вернула нужные дорожки для {0} (получено: {1}).").format(src.name, ', '.join(stems) or 'ничего'))
                 if len(stems) == 2:  # у двухдорожечных моделей вторая дорожка — минус, как бы она ни называлась
                     stems = {"vocals": stems["vocals"], "instrumental": next(a for n, a in stems.items() if n != "vocals")}
                 results.append(stems)
@@ -291,7 +291,7 @@ class Splitter:
                 sf.write(vocals_wav, vocals, rate, subtype="FLOAT")
                 parts, _ = self._separate(self._karaoke, vocals_wav)
                 if set(parts) != {"vocals", "instrumental"}:
-                    raise SplitterError(f"Модель бэк-вокала вернула неожиданные дорожки: {', '.join(parts)}.")
+                    raise SplitterError(tr("Модель бэк-вокала вернула неожиданные дорожки: {0}.").format(', '.join(parts)))
                 parts = _restore_levels(vocals, parts)
                 instrumental = sum(rest)
                 shared = min(len(instrumental), len(parts["instrumental"]))
@@ -347,7 +347,7 @@ class Splitter:
             parts, _ = self._separate(separator, wav)
             kept = _clean_part(parts)
             if kept is None:
-                raise SplitterError(f"Модель очистки вернула неожиданные дорожки для {name}: {', '.join(parts)}.")
+                raise SplitterError(tr("Модель очистки вернула неожиданные дорожки для {0}: {1}.").format(name, ', '.join(parts)))
             audio = kept
         # длина как у исходного голоса, чтобы дорожки совпадали по времени
         if len(audio) >= len(voice):
@@ -365,12 +365,12 @@ class Splitter:
         except Exception as exc:
             detail = str(exc) or type(exc).__name__
             if "out of memory" in detail.lower():
-                hint = "не хватило видеопамяти — закройте игры и другие программы, занимающие видеокарту"
+                hint = tr("не хватило видеопамяти — закройте игры и другие программы, занимающие видеокарту")
             elif "CUDA" in detail:
-                hint = "сбой видеокарты"
+                hint = tr("сбой видеокарты")
             else:
-                hint = "файл повреждён или не аудио?"
-            raise SplitterError(f"Не удалось обработать {src.name} ({hint}): {detail}") from exc
+                hint = tr("файл повреждён или не аудио?")
+            raise SplitterError(tr("Не удалось обработать {0} ({1}): {2}").format(src.name, hint, detail)) from exc
 
         stems, rate = {}, 44100
         for name in produced:

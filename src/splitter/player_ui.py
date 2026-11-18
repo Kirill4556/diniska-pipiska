@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from .audio import MixPlayer, load, mixer_tracks, save_mix
 from .errors import SplitterError
 from .lyrics import format_lrc, parse_lrc, save_lyrics
+from .i18n import tr
 
 
 def clock(seconds: float, fraction: bool = False) -> str:
@@ -52,7 +53,7 @@ class Transport(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.player: MixPlayer | None = None
-        self.play_button = QPushButton("Играть")
+        self.play_button = QPushButton(tr("Играть"))
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.play_button.setMinimumWidth(110)
         self.play_button.clicked.connect(self.toggle)
@@ -91,7 +92,7 @@ class Transport(QWidget):
             else:
                 self.player.play()
         except SplitterError as exc:
-            QMessageBox.warning(self, "Звук", str(exc))
+            QMessageBox.warning(self, tr("Звук"), str(exc))
         self.update_view()
 
     def _seek(self) -> None:
@@ -102,7 +103,7 @@ class Transport(QWidget):
         if self.player is None:
             return
         playing = self.player.playing
-        self.play_button.setText("Пауза" if playing else "Играть")
+        self.play_button.setText(tr("Пауза") if playing else tr("Играть"))
         self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay))
         if not self.slider.isSliderDown():
             self.slider.setValue(int(self.player.position * 10))
@@ -134,7 +135,7 @@ class MixerDialog(QDialog):
     def __init__(self, title: str, tracks: dict[str, Path], titles: dict[str, str], source: Path | None,
                  out_stem: Path, bitrate: int, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Слушать и смешать — {title}")
+        self.setWindowTitle(tr("Слушать и смешать — {0}").format(title))
         self.resize(620, 360)
         self._names = mixer_tracks(list(tracks))
         self._titles = titles
@@ -145,7 +146,7 @@ class MixerDialog(QDialog):
         self.player: MixPlayer | None = None
         self.saved: Path | None = None
 
-        self.note = QLabel("Загружаю дорожки…")
+        self.note = QLabel(tr("Загружаю дорожки…"))
         self.note.setWordWrap(True)
         self.sliders: dict[str, QSlider] = {}
         self.mutes: dict[str, QCheckBox] = {}
@@ -158,7 +159,7 @@ class MixerDialog(QDialog):
             slider.setPageStep(10)
             value = QLabel("100 %")
             value.setMinimumWidth(48)
-            mute = QCheckBox("выкл.")
+            mute = QCheckBox(tr("выкл."))
             slider.valueChanged.connect(self._update_gains)
             mute.toggled.connect(self._update_gains)
             grid.addWidget(QLabel(titles.get(name, name)), row, 0)
@@ -170,16 +171,16 @@ class MixerDialog(QDialog):
         self.tracks_box = QWidget()
         self.tracks_box.setLayout(grid)
 
-        self.original = QCheckBox("Слушать оригинал (для сравнения)")
+        self.original = QCheckBox(tr("Слушать оригинал (для сравнения)"))
         self.original.setEnabled(False)
         self.original.toggled.connect(self._update_gains)
         self.transport = Transport()
-        self.reset_button = QPushButton("Сбросить")
+        self.reset_button = QPushButton(tr("Сбросить"))
         self.reset_button.clicked.connect(self._reset)
-        self.save_button = QPushButton("Сохранить микс")
-        self.save_button.setToolTip(f"Сохранить то, что звучит сейчас, в {self._out_name().name}")
+        self.save_button = QPushButton(tr("Сохранить микс"))
+        self.save_button.setToolTip(tr("Сохранить то, что звучит сейчас, в {0}").format(self._out_name().name))
         self.save_button.clicked.connect(self._save)
-        self.close_button = QPushButton("Закрыть")
+        self.close_button = QPushButton(tr("Закрыть"))
         self.close_button.clicked.connect(self.close)
         buttons = QHBoxLayout()
         buttons.addWidget(self.reset_button)
@@ -214,11 +215,11 @@ class MixerDialog(QDialog):
         self.original.setEnabled(self.player.has_original)
         for widget in (self.tracks_box, self.reset_button, self.save_button):
             widget.setEnabled(True)
-        self.note.setText("Двигайте ползунки во время прослушивания. Пробел — играть/пауза.")
+        self.note.setText(tr("Двигайте ползунки во время прослушивания. Пробел — играть/пауза."))
         self._update_gains()
 
     def _on_failed(self, message: str) -> None:
-        self.note.setText(f"Не удалось загрузить дорожки: {message}")
+        self.note.setText(tr("Не удалось загрузить дорожки: {0}").format(message))
 
     def _update_gains(self, *_) -> None:
         for name, slider in self.sliders.items():
@@ -242,19 +243,19 @@ class MixerDialog(QDialog):
             return
         target = self._out_name()
         if target.exists():
-            answer = QMessageBox.question(self, "Сохранить микс", f"Файл {target.name} уже есть. Заменить?")
+            answer = QMessageBox.question(self, tr("Сохранить микс"), tr("Файл {0} уже есть. Заменить?").format(target.name))
             if answer != QMessageBox.StandardButton.Yes:
                 return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             save_mix(self.player.mix(), target, self._fmt, self._bitrate, tags_from=self._source)
         except (SplitterError, OSError) as exc:
-            QMessageBox.warning(self, "Сохранить микс", f"Не удалось сохранить: {exc}")
+            QMessageBox.warning(self, tr("Сохранить микс"), tr("Не удалось сохранить: {0}").format(exc))
             return
         finally:
             QApplication.restoreOverrideCursor()
         self.saved = target
-        self.note.setText(f"Микс сохранён: {target.name}")
+        self.note.setText(tr("Микс сохранён: {0}").format(target.name))
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Space:
@@ -282,15 +283,15 @@ class LyricsEditor(QDialog):
     def __init__(self, lrc_path: Path, audio: dict[str, Path], parent=None):
         super().__init__(parent)
         self._lrc_path = lrc_path
-        self.setWindowTitle(f"Текст песни — {lrc_path.stem}")
+        self.setWindowTitle(tr("Текст песни — {0}").format(lrc_path.stem))
         self.resize(700, 600)
         self.player: MixPlayer | None = None
         self._audio_names = list(audio)
 
-        self.note = QLabel("Загружаю звук…" if audio else "Звук для прослушивания не найден — текст можно править без него.")
+        self.note = QLabel(tr("Загружаю звук…") if audio else tr("Звук для прослушивания не найден — текст можно править без него."))
         self.note.setWordWrap(True)
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Время", "Строка"])
+        self.table.setHorizontalHeaderLabels([tr("Время"), tr("Строка")])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -301,17 +302,17 @@ class LyricsEditor(QDialog):
 
         self.listen = QComboBox()
         for name in self._audio_names:
-            self.listen.addItem(f"Слушать: {name}", name)
+            self.listen.addItem(tr("Слушать: {0}").format(name), name)
         self.listen.currentIndexChanged.connect(self._choose_track)
-        self.play_line_button = QPushButton("Строку")
+        self.play_line_button = QPushButton(tr("Строку"))
         self.play_line_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.play_line_button.setToolTip("Проиграть выбранную строку (двойной щелчок по времени — то же)")
-        self.earlier_button = QPushButton("−0,1 с")
-        self.later_button = QPushButton("+0,1 с")
-        self.stamp_button = QPushButton("Поставить сюда")
-        self.stamp_button.setToolTip("Записать текущую позицию в выбранную строку и перейти к следующей (клавиша Enter)")
-        self.add_button = QPushButton("Добавить строку")
-        self.delete_button = QPushButton("Удалить строку")
+        self.play_line_button.setToolTip(tr("Проиграть выбранную строку (двойной щелчок по времени — то же)"))
+        self.earlier_button = QPushButton(tr("−0,1 с"))
+        self.later_button = QPushButton(tr("+0,1 с"))
+        self.stamp_button = QPushButton(tr("Поставить сюда"))
+        self.stamp_button.setToolTip(tr("Записать текущую позицию в выбранную строку и перейти к следующей (клавиша Enter)"))
+        self.add_button = QPushButton(tr("Добавить строку"))
+        self.delete_button = QPushButton(tr("Удалить строку"))
         self.play_line_button.clicked.connect(self._play_line)
         self.earlier_button.clicked.connect(lambda: self._shift(-0.1))
         self.later_button.clicked.connect(lambda: self._shift(0.1))
@@ -331,13 +332,13 @@ class LyricsEditor(QDialog):
         listen_row.addWidget(self.listen)
         listen_row.addWidget(self.transport, 1)
 
-        self.save_button = QPushButton("Сохранить")
+        self.save_button = QPushButton(tr("Сохранить"))
         self.save_button.setDefault(True)
         self.save_button.clicked.connect(self.accept)
-        cancel = QPushButton("Отмена")
+        cancel = QPushButton(tr("Отмена"))
         cancel.clicked.connect(self.reject)
         buttons = QHBoxLayout()
-        buttons.addWidget(QLabel("Сохраняются оба файла: .lrc с таймкодами и .txt."))
+        buttons.addWidget(QLabel(tr("Сохраняются оба файла: .lrc с таймкодами и .txt.")))
         buttons.addStretch()
         buttons.addWidget(self.save_button)
         buttons.addWidget(cancel)
@@ -352,7 +353,7 @@ class LyricsEditor(QDialog):
         self._arrays: dict = {}
         self._sound_tools(False)
         self.loaded.connect(self._on_loaded)
-        self.load_failed.connect(lambda message: self.note.setText(f"Звук не загрузился ({message}) — текст можно править без него."))
+        self.load_failed.connect(lambda message: self.note.setText(tr("Звук не загрузился ({0}) — текст можно править без него.").format(message)))
         if audio:
             _Loader(audio, self.loaded, self.load_failed)
         if self.table.rowCount():
@@ -369,8 +370,7 @@ class LyricsEditor(QDialog):
         self._choose_track()
         self._sound_tools(True)
         self.note.setText(
-            "Выберите строку и нажмите «Строку» (или дважды щёлкните по времени), чтобы её прослушать. Чтобы расставить время заново: "
-            "включите песню и нажимайте Enter в начале каждой строки."
+            tr("Выберите строку и нажмите «Строку» (или дважды щёлкните по времени), чтобы её прослушать. Чтобы расставить время заново: включите песню и нажимайте Enter в начале каждой строки.")
         )
 
     def _choose_track(self, *_) -> None:
@@ -410,13 +410,13 @@ class LyricsEditor(QDialog):
             return
         start = self._row_time(row)
         if start is None:
-            self.note.setText(f"Строка {row + 1}: время записано неверно — нужно вида 1:05.30.")
+            self.note.setText(tr("Строка {0}: время записано неверно — нужно вида 1:05.30.").format(row + 1))
             return
         stop = self._row_time(row + 1) if row + 1 < self.table.rowCount() else None
         try:
             self.player.play(start=start, stop=stop if stop and stop > start else None)
         except SplitterError as exc:
-            QMessageBox.warning(self, "Звук", str(exc))
+            QMessageBox.warning(self, tr("Звук"), str(exc))
 
     def _shift(self, delta: float) -> None:
         row = self._current_row()
@@ -451,7 +451,7 @@ class LyricsEditor(QDialog):
             start = self._row_time(row)
             if start is None:
                 self.table.selectRow(row)
-                self.note.setText(f"Строка {row + 1}: время записано неверно — нужно вида 1:05.30.")
+                self.note.setText(tr("Строка {0}: время записано неверно — нужно вида 1:05.30.").format(row + 1))
                 return None
             text = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
             result.append((start, text))

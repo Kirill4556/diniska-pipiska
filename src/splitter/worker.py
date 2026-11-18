@@ -132,6 +132,9 @@ def main() -> None:
 
     try:
         job = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))  # -sig: PowerShell добавляет BOM
+        from . import i18n
+
+        i18n.set_language(job.get("ui_language", "ru"))
         if job.get("action") == "prefetch":
             prefetch(job, send)
             send("finished")

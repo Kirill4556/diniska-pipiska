@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .errors import SplitterError
 from .paths import cache_dir
+from .i18n import tr
 
 FORMATS = ("mp3", "wav", "flac")
 BITRATES = (192, 256, 320)
@@ -28,7 +29,7 @@ def ensure_ffmpeg() -> str:
         bundled = Path(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as exc:
         raise SplitterError(
-            "Не найден ffmpeg. Установите его (https://ffmpeg.org) и добавьте в PATH."
+            tr("Не найден ffmpeg. Установите его (https://ffmpeg.org) и добавьте в PATH.")
         ) from exc
 
     bin_dir = cache_dir() / "bin"
@@ -62,5 +63,5 @@ def encode(wav: Path, dst: Path, fmt: str, bitrate: int, tags_from: Path | None 
         dst.unlink(missing_ok=True)
         detail = result.stderr.strip()
         if "No space left" in detail:
-            raise SplitterError(f"Недостаточно места на диске для {dst.name}.")
-        raise SplitterError(f"ffmpeg не смог записать {dst.name}: {detail[-400:]}")
+            raise SplitterError(tr("Недостаточно места на диске для {0}.").format(dst.name))
+        raise SplitterError(tr("ffmpeg не смог записать {0}: {1}").format(dst.name, detail[-400:]))

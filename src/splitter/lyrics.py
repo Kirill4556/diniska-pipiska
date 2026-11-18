@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .errors import SplitterError
 from .paths import cache_dir
+from .i18n import tr
 
 LANGUAGES = {"auto": None, "ru": "ru", "en": "en"}
 
@@ -70,7 +71,7 @@ def prefetch_whisper() -> None:
     try:
         whisper._download(whisper._MODELS[name], str(models), False)
     except Exception as exc:
-        raise SplitterError(f"Не удалось скачать модель распознавания текста: {exc}") from exc
+        raise SplitterError(tr("Не удалось скачать модель распознавания текста: {0}").format(exc)) from exc
 
 
 class Transcriber:
@@ -89,8 +90,7 @@ class Transcriber:
             self._model = whisper.load_model(name, download_root=str(models))
         except Exception as exc:
             raise SplitterError(
-                f"Не удалось загрузить модель распознавания текста: {exc}\n"
-                "При первом запуске нужен интернет — модель скачивается один раз."
+                tr("Не удалось загрузить модель распознавания текста: {0}\nПри первом запуске нужен интернет — модель скачивается один раз.").format(exc)
             ) from exc
 
     def transcribe(self, vocals_wav: Path, language: str | None = None) -> list[tuple[float, str]]:
@@ -104,5 +104,5 @@ class Transcriber:
                 condition_on_previous_text=False,  # меньше зацикливаний на проигрышах
             )
         except Exception as exc:
-            raise SplitterError(f"Не удалось распознать текст: {str(exc) or type(exc).__name__}") from exc
+            raise SplitterError(tr("Не удалось распознать текст: {0}").format(str(exc) or type(exc).__name__)) from exc
         return [(seg["start"], seg["text"].strip()) for seg in result["segments"] if seg["text"].strip()]

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import __version__
 from .ffmpeg import ensure_ffmpeg
+from .i18n import tr
 
 API = "https://lrclib.net/api"
 USER_AGENT = f"splitter/{__version__} (desktop app)"
@@ -117,19 +118,19 @@ def lookup(path: Path, attempts: int = 2) -> tuple[list[tuple[float, str]] | Non
     """Ищет текст для файла. Возвращает (строки или None, пояснение для журнала). Не бросает исключений."""
     info = track_info(path)
     if info is None:
-        return None, "нет названия ни в тегах, ни в имени файла"
-    described = f"{info.artist + ' — ' if info.artist else ''}{info.title}, {info.duration:.0f} с"
+        return None, tr("нет названия ни в тегах, ни в имени файла")
+    described = tr("{0}{1}, {2:.0f} с").format(info.artist + ' — ' if info.artist else '', info.title, info.duration)
     for attempt in range(attempts):
         try:
             lrc = find_synced(info)
             break
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             if attempt == attempts - 1:
-                return None, f"{described}: сервис недоступен ({exc})"
+                return None, tr("{0}: сервис недоступен ({1})").format(described, exc)
     if not lrc:
-        return None, f"{described}: не найден"
+        return None, tr("{0}: не найден").format(described)
     lines = [line for line in normalize(lrc) if line[1]]
-    return (lines, f"{described}: найден") if lines else (None, f"{described}: пустой текст")
+    return (lines, tr("{0}: найден").format(described)) if lines else (None, tr("{0}: пустой текст").format(described))
 
 
 def _close(item: dict, info: TrackInfo) -> bool:

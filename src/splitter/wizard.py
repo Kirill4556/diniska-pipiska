@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from .core import MODEL_PACKS
 from .paths import cache_dir, models_dir
+from .i18n import tr
 
 PACK_TITLES = {
     "fast": "Минус и вокал — быстро",
@@ -42,7 +43,7 @@ def whisper_downloaded() -> bool:
 
 
 def size_text(megabytes: float) -> str:
-    return f"{megabytes / 1024:.1f} ГБ".replace(".", ",") if megabytes >= 1000 else f"{megabytes:.0f} МБ"
+    return tr("{0:.1f} ГБ").format(megabytes / 1024).replace(".", ",") if megabytes >= 1000 else tr("{0:.0f} МБ").format(megabytes)
 
 
 class FirstRunWizard(QDialog):
@@ -55,19 +56,17 @@ class FirstRunWizard(QDialog):
         self._process: subprocess.Popen | None = None
         self._gpu: bool | None = None
         self._error: str | None = None
-        self.setWindowTitle("Splitter — первый запуск")
+        self.setWindowTitle(tr("Splitter — первый запуск"))
         self.resize(560, 470)
 
         intro = QLabel(
-            "<b>Добро пожаловать!</b><br>Splitter делит песни на дорожки нейросетями прямо на этом компьютере. "
-            "Модели скачиваются один раз, дальше интернет не нужен. Можно скачать их сейчас, чтобы первое "
-            "разделение не ждало загрузки."
+            tr("<b>Добро пожаловать!</b><br>Splitter делит песни на дорожки нейросетями прямо на этом компьютере. Модели скачиваются один раз, дальше интернет не нужен. Можно скачать их сейчас, чтобы первое разделение не ждало загрузки.")
         )
         intro.setWordWrap(True)
-        self.device = QLabel("Видеокарта: проверяю…")
+        self.device = QLabel(tr("Видеокарта: проверяю…"))
         self.device.setWordWrap(True)
         free = shutil.disk_usage(cache_dir().anchor or cache_dir()).free / 1024**3
-        self.disk = QLabel(f"Свободно на диске с моделями: {free:.0f} ГБ".replace(".", ","))
+        self.disk = QLabel(tr("Свободно на диске с моделями: {0:.0f} ГБ").format(free).replace(".", ","))
         self._free_mb = free * 1024
 
         self.boxes: dict[str, QCheckBox] = {}
@@ -75,22 +74,22 @@ class FirstRunWizard(QDialog):
         for pack, title in PACK_TITLES.items():
             box = QCheckBox()
             if pack_downloaded(pack):
-                box.setText(f"{title} — уже скачано")
+                box.setText(tr("{0} — уже скачано").format(tr(title)))
                 box.setChecked(True)
                 box.setEnabled(False)
             else:
-                box.setText(f"{title} — ≈ {size_text(MODEL_PACKS[pack][1])}")
+                box.setText(f"{tr(title)} — ≈ {size_text(MODEL_PACKS[pack][1])}")
                 box.setChecked(pack in DEFAULT_PACKS)
             box.toggled.connect(self._update_total)
             self.boxes[pack] = box
             packs_layout.addWidget(box)
         self.lyrics_box = QCheckBox()
         if whisper_downloaded():
-            self.lyrics_box.setText("Распознавание текста песни — уже скачано")
+            self.lyrics_box.setText(tr("Распознавание текста песни — уже скачано"))
             self.lyrics_box.setChecked(True)
             self.lyrics_box.setEnabled(False)
         else:
-            self.lyrics_box.setText("Распознавание текста песни — ≈ 1,5 ГБ (без видеокарты ≈ 460 МБ)")
+            self.lyrics_box.setText(tr("Распознавание текста песни — ≈ 1,5 ГБ (без видеокарты ≈ 460 МБ)"))
         self.lyrics_box.toggled.connect(self._update_total)
         packs_layout.addWidget(self.lyrics_box)
 
@@ -100,10 +99,10 @@ class FirstRunWizard(QDialog):
         self.progress.setVisible(False)
         self.status = QLabel()
         self.status.setWordWrap(True)
-        self.download_button = QPushButton("Скачать выбранное")
+        self.download_button = QPushButton(tr("Скачать выбранное"))
         self.download_button.setDefault(True)
         self.download_button.clicked.connect(self._download)
-        self.close_button = QPushButton("Пропустить")
+        self.close_button = QPushButton(tr("Пропустить"))
         self.close_button.clicked.connect(self.reject)
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -115,7 +114,7 @@ class FirstRunWizard(QDialog):
         layout.addWidget(self.device)
         layout.addWidget(self.disk)
         layout.addSpacing(6)
-        layout.addWidget(QLabel("Что скачать:"))
+        layout.addWidget(QLabel(tr("Что скачать:")))
         layout.addLayout(packs_layout)
         layout.addWidget(self.total)
         layout.addStretch()
@@ -135,9 +134,9 @@ class FirstRunWizard(QDialog):
     def _update_total(self, *_) -> None:
         packs, lyrics = self.selected()
         size = sum(MODEL_PACKS[pack][1] for pack in packs) + (1543 if lyrics and self._gpu is not False else 461 if lyrics else 0)
-        text = f"Скачать: ≈ {size_text(size)}" if size else "Ничего скачивать не нужно."
+        text = tr("Скачать: ≈ {0}").format(size_text(size)) if size else tr("Ничего скачивать не нужно.")
         if size and size > self._free_mb * 0.9:
-            text += " — места на диске может не хватить!"
+            text += tr(" — места на диске может не хватить!")
         self.total.setText(text)
         self.download_button.setEnabled(bool(size) and self._process is None)
 
@@ -150,7 +149,7 @@ class FirstRunWizard(QDialog):
                 self._command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=flags
             )
         except OSError as exc:
-            self.device.setText(f"Видеокарта: не удалось проверить ({exc})")
+            self.device.setText(tr("Видеокарта: не удалось проверить ({0})").format(exc))
             return
         self._process = process
         process.stdin.write(json.dumps(job).encode("utf-8"))
@@ -175,16 +174,15 @@ class FirstRunWizard(QDialog):
         if kind == "device":
             self._gpu = event["gpu"]
             if event["gpu"]:
-                self.device.setText(f"Видеокарта: {event['name']}. Разделение будет быстрым.")
+                self.device.setText(tr("Видеокарта: {0}. Разделение будет быстрым.").format(event['name']))
             else:
                 self.device.setText(
-                    f"Видеокарта: {event['name']}.<br>Обработка пойдёт на процессоре — это в несколько раз медленнее; "
-                    "лучше выбирать «Быстро»."
+                    tr("Видеокарта: {0}.<br>Обработка пойдёт на процессоре — это в несколько раз медленнее; лучше выбирать «Быстро».").format(event['name'])
                 )
             self._update_total()
         elif kind == "prefetch_start":
-            title = PACK_TITLES.get(event["pack"], "Распознавание текста песни")
-            self.status.setText(f"Скачиваю {event['index'] + 1} из {event['total']}: {title}…")
+            title = tr(PACK_TITLES.get(event["pack"], "Распознавание текста песни"))
+            self.status.setText(tr("Скачиваю {0} из {1}: {2}…").format(event['index'] + 1, event['total'], title))
             self.progress.setValue(int(1000 * event["index"] / event["total"]))
             self._step = (event["index"], event["total"])
         elif kind == "model_download":
@@ -201,7 +199,7 @@ class FirstRunWizard(QDialog):
             box.setEnabled(False)
         self.progress.setVisible(True)
         self.progress.setValue(0)
-        self.status.setText("Начинаю…")
+        self.status.setText(tr("Начинаю…"))
         self._downloading = True
         self._run({"action": "prefetch", "packs": packs, "lyrics": lyrics})
 
@@ -210,12 +208,11 @@ class FirstRunWizard(QDialog):
         if getattr(self, "_downloading", False):
             self._downloading = False
             if self._error or code != 0:
-                self.status.setText(f"Скачать не получилось: {self._error or 'обработчик завершился с ошибкой'}. "
-                                    "Модели скачаются при первом разделении.")
+                self.status.setText(tr("Скачать не получилось: {0}. Модели скачаются при первом разделении.").format(self._error or 'обработчик завершился с ошибкой'))
             else:
                 self.progress.setValue(1000)
-                self.status.setText("Готово: модели скачаны, можно работать без интернета.")
-                self.close_button.setText("Готово")
+                self.status.setText(tr("Готово: модели скачаны, можно работать без интернета."))
+                self.close_button.setText(tr("Готово"))
             self.download_button.setEnabled(False)
         self._update_total()
 

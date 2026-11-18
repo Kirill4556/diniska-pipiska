@@ -22,6 +22,7 @@ from .cache import ResultCache, file_hash
 from .core import Options, Splitter, device_description, gpu_available, unique_stems
 from .download import download, is_url
 from .errors import SplitterError
+from .i18n import tr
 
 
 def _vocals_from_outputs(outputs: dict[str, Path], folder: Path, name: str) -> Path:
@@ -37,7 +38,7 @@ def _vocals_from_outputs(outputs: dict[str, Path], folder: Path, name: str) -> P
         shared = min(len(lead), len(backing))
         audio = lead[:shared] + backing[:shared]
     else:
-        raise SplitterError("В сохранённых дорожках нет вокала для распознавания текста.")
+        raise SplitterError(tr("В сохранённых дорожках нет вокала для распознавания текста."))
     wav = folder / f"{name}.wav"
     sf.write(wav, audio, RATE, subtype="PCM_16")
     return wav
@@ -154,7 +155,7 @@ def run(inputs: list[str], out: Path, options: Options, emit, use_cache: bool = 
                     try:
                         txt, lrc = save_lyrics(format_lrc(lines), out, stems[index])
                     except OSError as exc:
-                        fail(index, SplitterError(f"Не удалось сохранить текст: {exc}"))
+                        fail(index, SplitterError(tr("Не удалось сохранить текст: {0}").format(exc)))
                         del vocals[index]
                         continue
                     lyrics_ready(index, txt, lrc, len(lines), "lrclib")
