@@ -18,11 +18,16 @@ def language() -> str:
 
 
 def system_language() -> str:
-    """Язык системы: русский для русской системы, иначе английский."""
+    """Русский, если он есть среди языков пользователя (даже не первым), иначе английский.
+
+    Частый случай: Windows на английском, а русский добавлен вторым языком — программа русскоязычная,
+    поэтому тогда тоже русский.
+    """
     try:
         from PySide6.QtCore import QLocale
 
-        return "ru" if QLocale.system().language() == QLocale.Language.Russian else "en"
+        languages = [name.lower() for name in QLocale.system().uiLanguages()]
+        return "ru" if any(name == "ru" or name.startswith("ru-") for name in languages) else "en"
     except Exception:
         import locale
 
