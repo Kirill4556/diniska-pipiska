@@ -69,10 +69,33 @@ def output_names(options: Options) -> list[str]:
     return ["instrumental", "vocals"]
 
 
+_gpu_usable: bool | None = None
+
+
 def gpu_available() -> bool:
+    """Годится ли видеокарта для расчётов. Если нет — переводит torch на процессор.
+
+    Видеокарта может определяться, но не поддерживаться сборкой PyTorch (старые GTX, слишком новые модели):
+    тогда расчёт падает с «CUDA error: no kernel image is available». Проверяем настоящим вычислением.
+    """
+    global _gpu_usable
+    if _gpu_usable is not None:
+        return _gpu_usable
     import torch
 
-    return torch.cuda.is_available()
+    usable = False
+    if torch.cuda.is_available():
+        try:
+            probe = torch.ones(1, 1, 8, 8, device="cuda")
+            torch.nn.functional.conv2d(probe, probe[:, :, :3, :3]).sum().item()
+            usable = True
+        except Exception:
+            usable = False
+    if not usable:
+        # audio-separator и Whisper выбирают устройство по этой функции
+        torch.cuda.is_available = lambda: False
+    _gpu_usable = usable
+    return usable
 
 
 class Splitter:
@@ -81,6 +104,7 @@ class Splitter:
     def __init__(self, options: Options):
         options.validate()
         self.options = options
+        gpu_available()  # до загрузки моделей: при негодной видеокарте считаем на процессоре
         ensure_ffmpeg()
         self._workdir = Path(tempfile.mkdtemp(prefix="splitter_"))
         self._scratch = self._workdir / "scratch"
@@ -216,7 +240,13 @@ class Splitter:
             raise
         except Exception as exc:
             detail = str(exc) or type(exc).__name__
-            raise SplitterError(f"Не удалось обработать {src.name} (файл повреждён или не аудио?): {detail}") from exc
+            if "out of memory" in detail.lower():
+                hint = "не хватило видеопамяти — закройте игры и другие программы, занимающие видеокарту"
+            elif "CUDA" in detail:
+                hint = "сбой видеокарты"
+            else:
+                hint = "файл повреждён или не аудио?"
+            raise SplitterError(f"Не удалось обработать {src.name} ({hint}): {detail}") from exc
 
         stems, rate = {}, 44100
         for name in produced:

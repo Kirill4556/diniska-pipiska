@@ -43,10 +43,11 @@ class Transcriber:
     """Загруженная модель Whisper."""
 
     def __init__(self):
-        import torch
         import whisper
 
-        self._gpu = torch.cuda.is_available()
+        from .core import gpu_available
+
+        self._gpu = gpu_available()
         # на процессоре большая модель слишком медленная
         name = "turbo" if self._gpu else "small"
         models = cache_dir() / "whisper"

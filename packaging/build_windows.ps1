@@ -1,4 +1,4 @@
-# Сборка для Windows: папка packaging\dist\Splitter и, если установлен Inno Setup, установщик.
+﻿# Сборка для Windows: папка packaging\dist\Splitter и, если установлен Inno Setup, установщик.
 # Запуск из корня проекта:  powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)

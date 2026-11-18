@@ -490,7 +490,7 @@ class MainWindow(QMainWindow):
         position = f"{index + 1} из {len(self._batch)}" if index is not None else ""
 
         if kind == "device" and not event["gpu"]:
-            self.status.setText("Видеокарта (CUDA) не найдена — считаю на процессоре, один трек может занять до 10 минут.")
+            self.status.setText("Подходящая видеокарта NVIDIA не найдена — считаю на процессоре, один трек может занять до 10 минут.")
         elif kind == "model":
             self.status.setText("Загружаю модель (при первом запуске она скачивается)…")
         elif kind == "lyrics_model":

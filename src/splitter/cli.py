@@ -118,7 +118,7 @@ def run(args: argparse.Namespace) -> int:
 
     def emit(event: str, **data) -> None:
         if event == "device" and not data["gpu"]:
-            print("! GPU (CUDA) не найден — работаю на CPU, трек может занять до 10 минут.", file=sys.stderr)
+            print("! Подходящий GPU (CUDA) не найден — работаю на CPU, трек может занять до 10 минут.", file=sys.stderr)
         elif event == "download_start":
             print(f"{label(data['index'])}: скачиваю…")
         elif event == "downloaded":
