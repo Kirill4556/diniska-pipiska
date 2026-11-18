@@ -8,9 +8,6 @@ datas, binaries, hiddenimports = [], [], []
 import importlib.util
 
 packages = ["audio_separator", "whisper", "yt_dlp_ejs", "imageio_ffmpeg", "librosa", "lazy_loader", "sounddevice", "_sounddevice_data"]
-# лёгкая сборка: DirectML.dll и модуль torch_directml
-if importlib.util.find_spec("torch_directml") is not None:
-    packages.append("torch_directml")
 for package in packages:
     if importlib.util.find_spec(package) is None:
         continue

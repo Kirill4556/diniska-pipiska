@@ -139,38 +139,17 @@ def cuda_available() -> bool:
 
 
 def gpu_available() -> bool:
-    """Есть ли чем ускорить разделение: CUDA или DirectML."""
-    return cuda_available() or directml_available()
+    """Есть ли чем ускорить разделение.
 
-
-_directml_usable: bool | None = None
-
-
-def directml_available() -> bool:
-    """FR-31: DirectML (видеокарты AMD, Intel и NVIDIA без CUDA) — только в лёгкой сборке с torch-directml."""
-    global _directml_usable
-    if _directml_usable is not None:
-        return _directml_usable
-    _directml_usable = False
-    try:
-        import torch
-        import torch_directml
-
-        if torch_directml.is_available():
-            device = torch_directml.device()
-            probe = torch.ones(1, 1, 8, 8, device=device)
-            torch.nn.functional.conv2d(probe, probe[:, :, :3, :3]).sum().cpu().item()
-            _directml_usable = True
-    except Exception:
-        _directml_usable = False
-    return _directml_usable
+    DirectML (видеокарты AMD/Intel) проверялся и отклонён: на моделях разделения он не быстрее процессора
+    (BS-Roformer, 20 с звука: 158 с на DirectML против 156 с на процессоре) — см. ТЗ, FR-31.
+    """
+    return cuda_available()
 
 
 def accelerator() -> str:
-    """Чем считать разделение: cuda, directml или cpu."""
-    if cuda_available():
-        return "cuda"
-    return "directml" if directml_available() else "cpu"
+    """Чем считать разделение: cuda или cpu."""
+    return "cuda" if cuda_available() else "cpu"
 
 
 def device_description() -> str:
@@ -180,13 +159,6 @@ def device_description() -> str:
     import torch
 
     usable = cuda_available()
-    if not usable and directml_available():
-        try:
-            import torch_directml
-
-            return f"{torch_directml.device_name(0)} (DirectML) — " + tr("используется")
-        except Exception:
-            return "DirectML — " + tr("используется")
     try:
         if not torch.cuda.device_count():
             return tr("видеокарта NVIDIA не найдена, расчёт на процессоре")
@@ -279,7 +251,6 @@ class Splitter:
             # без нормализации: дорожки должны в сумме давать оригинал
             normalization_threshold=1.0,
             **(speed_settings(self.options.quality) if accelerator() == "cuda" else {}),
-            use_directml=accelerator() == "directml",
             demucs_params={"segment_size": "Default", "shifts": DEMUCS_SHIFTS[self.options.quality], "overlap": 0.25, "segments_enabled": True},
         )
         try:

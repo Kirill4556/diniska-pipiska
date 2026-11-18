@@ -90,7 +90,7 @@ Enter в начале каждой строки, время расставитс
 | Платформа | Команда | Результат |
 | --- | --- | --- |
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1` | `packaging\dist\Splitter\` и установщик `packaging\dist\SplitterSetup-*.exe` с `.bin`-файлами |
-| Windows, лёгкая | `powershell -ExecutionPolicy Bypass -File packaging\build_windows_light.ps1` | `packaging\dist-light\Splitter\` и `packaging\dist\SplitterSetup-light-*.exe`: без CUDA, с DirectML — для AMD, Intel и NVIDIA без поддержки CUDA |
+| Windows, лёгкая | `powershell -ExecutionPolicy Bypass -File packaging\build_windows_light.ps1` | `packaging\dist-light\Splitter\` и `packaging\dist\SplitterSetup-light-*.exe`: без CUDA, для компьютеров без подходящей NVIDIA (расчёт на процессоре) |
 | Linux | `bash packaging/build_linux.sh` | `packaging/dist/Splitter-linux-x86_64.tar.gz` |
 
 В папке приложения два файла: `Splitter` — окно, `splitter-cli` — командная строка (те же параметры, что у `uv run splitter`).
@@ -99,6 +99,11 @@ Enter в начале каждой строки, время расставитс
 разбит на `.exe` и `.bin`-файлы — переносить их нужно вместе.
 
 Модели в сборку не входят: они скачиваются при первом запуске.
+
+Linux (проверено в WSL Ubuntu на RTX 4060): для сборки нужен компилятор C — пакет `diffq` не выкладывает готовую
+сборку под Linux (`sudo apt install build-essential`). Для окна нужны библиотеки Qt для X11
+(`sudo apt install libxcb-cursor0 libxkbcommon-x11-0`), для прослушивания — `libportaudio2`.
+Архив с CUDA весит около 3,9 ГБ — больше лимита GitHub на файл релиза (2 ГБ).
 
 ## Состояние
 
@@ -113,7 +118,7 @@ Enter в начале каждой строки, время расставитс
 | 6. Прослушивание и текст | плеер и микшер дорожек, редактор текста со звуком, готовый текст из LRCLIB | готово |
 | 7. Качество и скорость | ускорение «качественно», очистка вокала, режим «максимум», кэш результатов | в работе |
 | 8. Интерфейс | карточки с волной, темы, мастер первого запуска, английский язык | готово |
-| 9. Оборудование и сборки | DirectML, лёгкая версия без CUDA, Linux | |
+| 9. Оборудование и сборки | лёгкая версия без CUDA, Linux (собрана и проверена в WSL Ubuntu); DirectML проверен и отклонён — не быстрее процессора | в работе |
 
 Функций караоке (подсветка слов, видео, тональность и темп) в приложении нет и не планируется.
 

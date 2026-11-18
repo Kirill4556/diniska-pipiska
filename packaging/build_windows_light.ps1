@@ -1,6 +1,6 @@
-﻿# Лёгкая сборка для Windows (FR-32): без CUDA, с DirectML (FR-31) — для компьютеров без подходящей NVIDIA.
-# PyTorch 2.4.1 без CUDA + torch-directml: ускорение на видеокартах AMD, Intel и NVIDIA через DirectX 12,
-# без видеокарты — расчёт на процессоре. Отдельное окружение, основная сборка не меняется.
+﻿# Лёгкая сборка для Windows (FR-32): PyTorch без CUDA — для компьютеров без подходящей видеокарты NVIDIA.
+# Та же версия PyTorch, что и в основной сборке, но из индекса CPU: установщик в разы меньше.
+# Отдельное окружение packaging\.venv-light, основная сборка не меняется.
 # Запуск из корня проекта:  powershell -ExecutionPolicy Bypass -File packaging\build_windows_light.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
@@ -11,9 +11,15 @@ if (-not (Test-Path $python)) {
     uv venv $venv --python 3.11
     if ($LASTEXITCODE -ne 0) { throw "Не удалось создать окружение" }
 }
-# torch-directml требует ровно torch 2.4.1; на PyPI для Windows это сборка без CUDA
-uv pip install --python $python --no-sources --override packaging\light-overrides.txt -e . pyinstaller "torch-directml==0.2.5.dev240914"
+# версия torch — как в основной сборке (uv.lock), только без CUDA
+$torch = (uv run --no-sync python -c "import torch; print(torch.__version__.split('+')[0])").Trim()
+uv pip install --python $python "torch==$torch" --index-url https://download.pytorch.org/whl/cpu
+if ($LASTEXITCODE -ne 0) { throw "Не удалось установить PyTorch без CUDA" }
+# остальное — как в проекте; --no-sources: не брать torch из CUDA-индекса, установленный уже подходит
+uv pip install --python $python --no-sources -e . pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "Не удалось установить зависимости" }
+& $python -c "import torch; assert not torch.version.cuda, 'в лёгкой сборке оказался PyTorch с CUDA'; print('torch', torch.__version__)"
+if ($LASTEXITCODE -ne 0) { throw "Неверная сборка PyTorch" }
 
 & $python -m PyInstaller packaging/splitter.spec --noconfirm --distpath packaging/dist-light --workpath packaging/build-light --log-level WARN
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller завершился с ошибкой" }

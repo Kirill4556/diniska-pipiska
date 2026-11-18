@@ -1,7 +1,7 @@
 ; Установщик для Windows (Inno Setup 6). Сборка: ISCC.exe packaging\installer.iss
 ; Ставится без прав администратора в профиль пользователя.
 
-#define AppVersion "0.1.1"
+#define AppVersion "0.2.0"
 
 [Setup]
 AppId={{6E1B3C52-7B0A-4C1E-9C55-5A7B1D0E4F21}
@@ -16,7 +16,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist
 #ifdef Light
-; лёгкая сборка (без CUDA, с DirectML): ISCC /DLight packaging\installer.iss
+; лёгкая сборка (без CUDA): ISCC /DLight packaging\installer.iss
 OutputBaseFilename=SplitterSetup-light-{#AppVersion}
 #else
 OutputBaseFilename=SplitterSetup-{#AppVersion}
