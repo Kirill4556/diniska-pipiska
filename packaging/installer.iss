@@ -15,7 +15,12 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=dist
+#ifdef Light
+; лёгкая сборка (без CUDA, с DirectML): ISCC /DLight packaging\installer.iss
+OutputBaseFilename=SplitterSetup-light-{#AppVersion}
+#else
 OutputBaseFilename=SplitterSetup-{#AppVersion}
+#endif
 Compression=lzma2/normal
 SolidCompression=no
 ; приложение с PyTorch/CUDA больше 2 ГБ — установщик делится на setup.exe и .bin-файлы
@@ -33,7 +38,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
+#ifdef Light
+Source: "dist-light\Splitter\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+#else
 Source: "dist\Splitter\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+#endif
 
 [Icons]
 Name: "{group}\Splitter"; Filename: "{app}\Splitter.exe"

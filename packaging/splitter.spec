@@ -5,7 +5,15 @@ from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 datas, binaries, hiddenimports = [], [], []
 # пакеты с файлами данных и модулями, которые подгружаются по имени
-for package in ("audio_separator", "whisper", "yt_dlp_ejs", "imageio_ffmpeg", "librosa", "lazy_loader"):
+import importlib.util
+
+packages = ["audio_separator", "whisper", "yt_dlp_ejs", "imageio_ffmpeg", "librosa", "lazy_loader", "sounddevice", "_sounddevice_data"]
+# лёгкая сборка: DirectML.dll и модуль torch_directml
+if importlib.util.find_spec("torch_directml") is not None:
+    packages.append("torch_directml")
+for package in packages:
+    if importlib.util.find_spec(package) is None:
+        continue
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(package)
     datas += pkg_datas
     binaries += pkg_binaries

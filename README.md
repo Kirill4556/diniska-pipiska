@@ -90,6 +90,7 @@ Enter в начале каждой строки, время расставитс
 | Платформа | Команда | Результат |
 | --- | --- | --- |
 | Windows | `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1` | `packaging\dist\Splitter\` и установщик `packaging\dist\SplitterSetup-*.exe` с `.bin`-файлами |
+| Windows, лёгкая | `powershell -ExecutionPolicy Bypass -File packaging\build_windows_light.ps1` | `packaging\dist-light\Splitter\` и `packaging\dist\SplitterSetup-light-*.exe`: без CUDA, с DirectML — для AMD, Intel и NVIDIA без поддержки CUDA |
 | Linux | `bash packaging/build_linux.sh` | `packaging/dist/Splitter-linux-x86_64.tar.gz` |
 
 В папке приложения два файла: `Splitter` — окно, `splitter-cli` — командная строка (те же параметры, что у `uv run splitter`).

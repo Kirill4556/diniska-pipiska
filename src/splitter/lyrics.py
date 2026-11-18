@@ -55,10 +55,10 @@ def save_lyrics(lrc: str, out_dir: Path, stem: str) -> tuple[Path, Path]:
 
 
 def whisper_model_name() -> str:
-    from .core import gpu_available
+    from .core import cuda_available
 
-    # на процессоре большая модель слишком медленная
-    return "turbo" if gpu_available() else "small"
+    # Whisper умеет только CUDA; на процессоре большая модель слишком медленная
+    return "turbo" if cuda_available() else "small"
 
 
 def prefetch_whisper() -> None:
@@ -80,9 +80,9 @@ class Transcriber:
     def __init__(self):
         import whisper
 
-        from .core import gpu_available
+        from .core import cuda_available
 
-        self._gpu = gpu_available()
+        self._gpu = cuda_available()
         name = whisper_model_name()
         models = cache_dir() / "whisper"
         models.mkdir(exist_ok=True)

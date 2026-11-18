@@ -16,3 +16,6 @@ samples/
 # сборка
 packaging/build/
 packaging/dist/
+packaging/build-light/
+packaging/dist-light/
+packaging/.venv-light/

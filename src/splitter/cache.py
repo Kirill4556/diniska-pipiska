@@ -14,7 +14,7 @@ from pathlib import Path
 from .core import CLEAN_MODELS, KARAOKE_MODEL, MODELS, Options
 from .paths import cache_dir
 
-CACHE_VERSION = 1  # поднимать, когда меняется сама обработка (модели, сведение уровней)
+CACHE_VERSION = 2  # поднимать, когда меняется сама обработка (модели, сведение уровней, настройки скорости)
 MAX_ENTRIES = 2000
 
 

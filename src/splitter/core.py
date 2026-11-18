@@ -37,8 +37,26 @@ CLEAN_MODELS = ("dereverb_echo_mbr_fused.ckpt", "denoise_mel_band_roformer_aufr3
 
 _STEM_RE = re.compile(r"_\(([^)]+)\)_")
 
-# настройки скорости моделей (подобраны замером на RTX 4060, см. README)
-SPEED_SETTINGS: dict = {}
+# Скорость моделей Roformer (замер на RTX 4060, трек 4 минуты, BS-Roformer):
+#   по умолчанию (overlap из модели = 4)       264 с
+#   половинная точность (autocast)             130 с, отличие от эталона −73 дБ — тот же результат
+#   autocast + overlap 2                        69 с, отличие −43 дБ — ниже шума mp3, на слух не отличить
+# «Качественно» — autocast + overlap 2; «максимум» — только autocast (полное перекрытие).
+MDXC_OVERLAP = {"fast": 2, "high": 2, "max": None}  # None — как в настройках модели
+
+
+def speed_settings(quality: str) -> dict:
+    """Параметры Separator для CUDA. На процессоре и DirectML половинная точность не используется."""
+    return {
+        "use_autocast": True,
+        "mdxc_params": {
+            "segment_size": 256,
+            "override_model_segment_size": False,
+            "batch_size": None,
+            "overlap": MDXC_OVERLAP[quality],
+            "pitch_shift": 0,
+        },
+    }
 
 
 @dataclass
@@ -94,7 +112,7 @@ def clean_target(options: Options) -> str:
 _gpu_usable: bool | None = None
 
 
-def gpu_available() -> bool:
+def cuda_available() -> bool:
     """Годится ли видеокарта для расчётов. Если нет — переводит torch на процессор.
 
     Видеокарта может определяться, но не поддерживаться сборкой PyTorch (старые GTX, слишком новые модели):
@@ -120,13 +138,55 @@ def gpu_available() -> bool:
     return usable
 
 
+def gpu_available() -> bool:
+    """Есть ли чем ускорить разделение: CUDA или DirectML."""
+    return cuda_available() or directml_available()
+
+
+_directml_usable: bool | None = None
+
+
+def directml_available() -> bool:
+    """FR-31: DirectML (видеокарты AMD, Intel и NVIDIA без CUDA) — только в лёгкой сборке с torch-directml."""
+    global _directml_usable
+    if _directml_usable is not None:
+        return _directml_usable
+    _directml_usable = False
+    try:
+        import torch
+        import torch_directml
+
+        if torch_directml.is_available():
+            device = torch_directml.device()
+            probe = torch.ones(1, 1, 8, 8, device=device)
+            torch.nn.functional.conv2d(probe, probe[:, :, :3, :3]).sum().cpu().item()
+            _directml_usable = True
+    except Exception:
+        _directml_usable = False
+    return _directml_usable
+
+
+def accelerator() -> str:
+    """Чем считать разделение: cuda, directml или cpu."""
+    if cuda_available():
+        return "cuda"
+    return "directml" if directml_available() else "cpu"
+
+
 def device_description() -> str:
     """Видеокарта и драйвер одной строкой — для журнала и отчёта об ошибке."""
     import subprocess
 
     import torch
 
-    usable = gpu_available()
+    usable = cuda_available()
+    if not usable and directml_available():
+        try:
+            import torch_directml
+
+            return f"{torch_directml.device_name(0)} (DirectML) — " + tr("используется")
+        except Exception:
+            return "DirectML — " + tr("используется")
     try:
         if not torch.cuda.device_count():
             return tr("видеокарта NVIDIA не найдена, расчёт на процессоре")
@@ -218,7 +278,8 @@ class Splitter:
             output_format="WAV",
             # без нормализации: дорожки должны в сумме давать оригинал
             normalization_threshold=1.0,
-            **SPEED_SETTINGS,
+            **(speed_settings(self.options.quality) if accelerator() == "cuda" else {}),
+            use_directml=accelerator() == "directml",
             demucs_params={"segment_size": "Default", "shifts": DEMUCS_SHIFTS[self.options.quality], "overlap": 0.25, "segments_enabled": True},
         )
         try:
